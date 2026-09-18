@@ -425,6 +425,91 @@ extern "C" void wf_ui_show_settings_dialog(void)
 	dlg->show();
 }
 
+/* ------------------------------------------------------------ setup guide */
+
+extern "C" void wf_ui_show_toast_guide(void)
+{
+	QDialog *dlg = new QDialog(main_window());
+	dlg->setAttribute(Qt::WA_DeleteOnClose);
+	dlg->setWindowTitle("Toasts & Assistant - Setup Guide");
+	dlg->resize(620, 0);
+
+	auto *text = new QLabel(
+		"<h3>1. Add the overlay</h3>"
+		"<p>Sources &gt; <b>+</b> &gt; <b>Windows Notification Toasts</b> (and/or <b>Paperclip Assistant</b>). "
+		"Put it above your scene. Until you choose an <b>Event Source</b> in its Properties, "
+		"it shows a &quot;not set up yet&quot; notice on the overlay.</p>"
+		"<h3>2. Choose where the events come from</h3>"
+		"<p><b>Twitch chat (no login needed)</b> - type your channel name. You get toasts for chat, subscriptions "
+		"and gifts, cheers (bits) and raids. Twitch does not hand out <i>follows</i> without a login.</p>"
+		"<p><b>My own</b> - a text file (every new line becomes a toast) or the local web address below. "
+		"Use this for follows, tips and donations from bots such as <b>Streamer.bot</b>.</p>"
+		"<h3>3. Follows, tips and donations (Streamer.bot)</h3>"
+		"<p>Turn on the web address, then in Streamer.bot add a <b>Fetch URL</b> sub-action to your "
+		"Follow / Sub / Cheer / Donation actions using the address you copy below. "
+		"Change <code>type=</code> to follow, sub, donation or chat, and <code>title=</code> / "
+		"<code>text=</code> to what you want shown (Streamer.bot's <code>%user%</code> is the person's name).</p>"
+		"<p>The web address only listens on this computer, needs the secret token, and only runs while a toast "
+		"or assistant source exists.</p>");
+	text->setWordWrap(true);
+	text->setTextFormat(Qt::RichText);
+
+	auto *status = new QLabel();
+	auto refresh = [status]() {
+		struct wf_prefs *p = wf_prefs_get();
+		status->setText(p->http_enabled ? QString("Web address: <b>ON</b> (port %1)").arg(p->http_port)
+						: QString("Web address: <b>OFF</b>"));
+	};
+	refresh();
+
+	auto *enable = new QPushButton("Turn on the web address");
+	auto *copy_toast = new QPushButton("Copy toast URL (follow example)");
+	auto *copy_ass = new QPushButton("Copy assistant URL");
+	auto *test = new QPushButton("Send a test toast");
+	auto *close = new QPushButton("Close");
+
+	QObject::connect(enable, &QPushButton::clicked, dlg, [refresh]() {
+		struct wf_prefs *p = wf_prefs_get();
+		p->http_enabled = true;
+		wf_prefs_save();
+		wf_notify_http_apply_prefs();
+		refresh();
+	});
+	QObject::connect(copy_toast, &QPushButton::clicked, dlg, []() {
+		struct wf_prefs *p = wf_prefs_get();
+		QApplication::clipboard()->setText(
+			QString("http://127.0.0.1:%1/toast?token=%2&type=follow&title=New%20follower&text=%user%")
+				.arg(p->http_port)
+				.arg(QString::fromUtf8(p->http_token)));
+	});
+	QObject::connect(copy_ass, &QPushButton::clicked, dlg, []() {
+		struct wf_prefs *p = wf_prefs_get();
+		QApplication::clipboard()->setText(QString("http://127.0.0.1:%1/assistant?token=%2&text=Time%20for%20a%20break!")
+							   .arg(p->http_port)
+							   .arg(QString::fromUtf8(p->http_token)));
+	});
+	QObject::connect(test, &QPushButton::clicked, dlg, []() {
+		struct wf_msg m = {"follow", "New follower", "Oskar just followed the stream!"};
+		wf_notify_push(WF_TARGET_TOAST, &m);
+	});
+	QObject::connect(close, &QPushButton::clicked, dlg, &QDialog::accept);
+
+	auto *lay = new QVBoxLayout(dlg);
+	lay->addWidget(text);
+	lay->addWidget(status);
+	auto *row1 = new QHBoxLayout();
+	row1->addWidget(enable);
+	row1->addWidget(copy_toast);
+	row1->addWidget(copy_ass);
+	lay->addLayout(row1);
+	auto *row2 = new QHBoxLayout();
+	row2->addWidget(test);
+	row2->addStretch(1);
+	row2->addWidget(close);
+	lay->addLayout(row2);
+	dlg->show();
+}
+
 /* --------------------------------------------------------------- download */
 
 extern "C" void wf_ui_show_download_dialog(void)

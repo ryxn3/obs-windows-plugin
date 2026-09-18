@@ -14,6 +14,7 @@ void wf_ui_show_presets_dialog(void);
 void wf_ui_show_copy_dialog(void);
 void wf_ui_show_settings_dialog(void);
 void wf_ui_show_download_dialog(void);
+void wf_ui_show_toast_guide(void);
 void wf_ui_check_updates(void);
 
 /* Small helpers usable from the C code (properties-panel buttons). Each

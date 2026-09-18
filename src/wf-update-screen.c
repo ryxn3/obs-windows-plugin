@@ -76,21 +76,25 @@ static const char *us_get_name(void *unused)
 }
 
 /* per-version default texts */
-static const char *def_title[7] = {"Windows 2000 Professional Setup",
+static const char *def_title[9] = {"Windows 2000 Professional Setup",
 				   "Windows Setup",
 				   "Installing updates",
 				   "Configuring Windows Updates",
 				   "Working on updates",
 				   "Working on updates",
-				   "Working on updates"};
-static const char *def_msg[7] = {
+				   "Working on updates",
+				   "Windows 95 Setup",
+				   "Your device ran into a problem and needs to restart."};
+static const char *def_msg[9] = {
 	"Please wait while Setup installs updates and copies files to your Windows installation folders. This may take several minutes to complete.",
 	"Please wait while Setup updates your Windows configuration. Do not turn off your computer.",
 	"Do not turn off your computer.",
 	"Do not turn off your computer",
 	"Don't turn off your PC. This will take a while.",
 	"Don't turn off your PC. This will take a while.",
-	"Don't turn off your PC. This will take a while."};
+	"Don't turn off your PC. This will take a while.",
+	"Please wait while Setup updates your Windows configuration. Do not turn off your computer.",
+	"We're just collecting some error info, and then we'll restart for you."};
 
 static void us_update(void *data, obs_data_t *s)
 {
@@ -102,7 +106,7 @@ static void us_update(void *data, obs_data_t *s)
 	if (a->height < 240)
 		a->height = 240;
 	a->version = (int)obs_data_get_int(s, S_VER);
-	if (a->version < 0 || a->version > 6)
+	if (a->version < 0 || a->version > 8)
 		a->version = 5;
 	a->mode = (int)obs_data_get_int(s, S_MODE);
 	a->duration = (float)obs_data_get_double(s, S_DUR);
@@ -208,6 +212,8 @@ static obs_properties_t *us_properties(void *data)
 	obs_property_list_add_int(v, obs_module_text("Update.V4"), 4);
 	obs_property_list_add_int(v, obs_module_text("Update.V5"), 5);
 	obs_property_list_add_int(v, obs_module_text("Update.V6"), 6);
+	obs_property_list_add_int(v, obs_module_text("Update.V7"), 7);
+	obs_property_list_add_int(v, obs_module_text("Update.V8"), 8);
 	obs_property_t *m = obs_properties_add_list(p, S_MODE, obs_module_text("Update.Mode"), OBS_COMBO_TYPE_LIST,
 						    OBS_COMBO_FORMAT_INT);
 	obs_property_list_add_int(m, obs_module_text("Update.M0"), 0);
@@ -396,7 +402,8 @@ static void us_layout(struct upd *a, struct layout *L)
 			 false);
 		break;
 	}
-	case 1: { /* Windows 98 setup dialog */
+	case 7:
+	case 1: { /* Windows 98 / 95 setup dialog */
 		set_rect(L->dlg, W * 0.5f - 340 * u, H * 0.5f - 160 * u, 680 * u, 320 * u);
 		set_rect(L->bar, L->dlg[0] + 32 * u, L->dlg[1] + 190 * u, L->dlg[2] - 64 * u, 36 * u);
 		set_rect(L->btn, L->dlg[0] + L->dlg[2] - 32 * u - 130 * u, L->dlg[1] + 262 * u, 130 * u, 36 * u);
@@ -413,6 +420,8 @@ static void us_layout(struct upd *a, struct layout *L)
 		item_set(&it[3], 3, "Cancel", "Tahoma", px, false, 0xFF808080u, 0, L->btn[0] + 36 * u, L->btn[1] + 6 * u,
 			 false);
 		item_set(&it[4], 4, time_line, "Tahoma", px, false, WHITE, 0, 20 * u, H - 40 * u, false);
+		if (a->version == 7)
+			item_set(&it[5], 5, "Windows Update Setup", "Times New Roman", (int)(54 * u), true, WHITE, 0, 50 * u, 40 * u, false);
 		break;
 	}
 	case 2: { /* Windows XP */
@@ -434,6 +443,22 @@ static void us_layout(struct upd *a, struct layout *L)
 			 0, W * 0.5f, y + 62 * u, true);
 		item_set(&it[2], 2, msg, "Segoe UI", px, false, WHITE, 0, W * 0.5f, y + 124 * u, true);
 		item_set(&it[3], 3, time_line, "Segoe UI", (int)(26 * u), false, 0xFFB0B0B0u, 0, W * 0.5f, H * 0.90f, true);
+		break;
+	}
+	case 8: { /* blue screen */
+		const float x = W * 0.09f;
+		item_set(&it[0], 0, ":(", "Segoe UI", (int)(200 * u), false, WHITE, 0, x, H * 0.10f, false);
+		item_set(&it[1], 1, title, "Segoe UI", (int)(38 * u), false, WHITE, (int)(W * 0.62f), x, H * 0.10f + 270 * u, false);
+		snprintf(pct_line, sizeof(pct_line), done ? "%s" : "%d%% complete", done ? (a->finish[0] ? a->finish : "Restarting") : "", pc);
+		if (!done)
+			snprintf(pct_line, sizeof(pct_line), "%d%% complete", pc);
+		item_set(&it[2], 2, pct_line, "Segoe UI", (int)(34 * u), false, WHITE, 0, x, H * 0.10f + 400 * u, false);
+		item_set(&it[3], 3, msg, "Segoe UI", (int)(22 * u), false, WHITE, (int)(W * 0.5f), x, H * 0.10f + 470 * u, false);
+		item_set(&it[4], 4, time_line, "Segoe UI", (int)(22 * u), false, 0xFFDCDCDCu, 0, x, H * 0.90f, false);
+		uint32_t c = (uint32_t)a->accent;
+		L->tint[0] = (float)(c & 0xFF) / 255.0f;
+		L->tint[1] = (float)((c >> 8) & 0xFF) / 255.0f;
+		L->tint[2] = (float)((c >> 16) & 0xFF) / 255.0f;
 		break;
 	}
 	default: { /* Windows 8 / 10 / 11 */

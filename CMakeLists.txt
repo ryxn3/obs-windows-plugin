@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.20)
 
-project(win-frame-filter VERSION 1.3.0 LANGUAGES C CXX)
+project(win-frame-filter VERSION 1.4.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -41,6 +41,7 @@ add_library(win-frame-filter MODULE
 	src/wf-prefs.c
 	src/wf-alttab.c
 	src/wf-notify.c
+	src/wf-twitch.c
 	src/wf-toast.c
 	src/wf-assistant.c
 	src/wf-update-screen.c
@@ -165,7 +166,7 @@ if(WF_BUILD_RENDER_TEST AND OBS_LIB)
 	target_link_libraries(source-test PRIVATE "${OBS_LIB}")
 	target_compile_definitions(source-test PRIVATE _CRT_SECURE_NO_WARNINGS)
 
-	add_executable(logic-test tools/render-test/logic_test.c src/wf-notify.c src/wf-actions.c src/wf-http.c src/wf-prefs.c
+	add_executable(logic-test tools/render-test/logic_test.c src/wf-notify.c src/wf-twitch.c src/wf-actions.c src/wf-http.c src/wf-prefs.c
 		src/win-frame-presets.c src/win-frame-styles.c)
 	target_include_directories(logic-test PRIVATE src "${OBS_SOURCE_DIR}/libobs" "${OBS_SOURCE_DIR}/frontend/api")
 	if(OBS_CONFIG_DIR)

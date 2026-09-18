@@ -14,6 +14,7 @@
 #include <graphics/vec4.h>
 #include "win-frame-text.h"
 #include "wf-notify.h"
+#include "wf-twitch.h"
 
 #define S_W "t_width"
 #define S_H "t_height"
@@ -27,8 +28,15 @@
 #define S_APP "t_app"
 #define S_FILE "t_file"
 #define S_INJECT "t_inject"
+#define S_SOURCE "t_source"
+#define S_CHANNEL "t_channel"
+#define S_TW_CHAT "t_tw_chat"
+#define S_TW_SUBS "t_tw_subs"
+#define S_TW_BITS "t_tw_bits"
+#define S_TW_RAIDS "t_tw_raids"
 
 #define MAX_TOASTS 4
+#define NSLOT (MAX_TOASTS + 1) /* the last slot holds the "not set up" notice */
 
 #define TOAST_PARAMS(X) \
 	X(text_tex) X(quad_size) X(card) X(style) X(alpha) X(kind) X(dark) X(accent) X(text_pos) X(text_size) \
@@ -43,6 +51,7 @@ enum {
 
 struct toast {
 	bool alive;
+	bool sticky;
 	uint64_t born_ns;
 	struct wf_msg msg;
 	int kind;
@@ -66,10 +75,14 @@ struct toast_src {
 	bool dark;
 	long long accent;
 	char app[64];
+	int source_mode; /* 0 not set up, 1 own sources, 2 Twitch chat */
+	char channel[64];
+	int tw_flags;
+	char notice_key[96];
 
 	struct wf_filetail tail;
 	uint64_t last_poll_ns;
-	struct toast items[MAX_TOASTS];
+	struct toast items[NSLOT];
 	int test_index;
 	bool http_acquired;
 };
@@ -112,7 +125,7 @@ static void ts_update(void *data, obs_data_t *s)
 		t->height = 240;
 	t->corner = (int)obs_data_get_int(s, S_CORNER);
 	t->style = (int)obs_data_get_int(s, S_STYLE);
-	if (t->style < 0 || t->style > 4)
+	if (t->style < 0 || t->style > 6)
 		t->style = 3;
 	t->max_toasts = (int)obs_data_get_int(s, S_MAX);
 	if (t->max_toasts < 1)
@@ -130,6 +143,15 @@ static void ts_update(void *data, obs_data_t *s)
 	strncpy(t->app, obs_data_get_string(s, S_APP), sizeof(t->app) - 1);
 	t->app[sizeof(t->app) - 1] = 0;
 	wf_filetail_set(&t->tail, obs_data_get_string(s, S_FILE));
+
+	t->source_mode = (int)obs_data_get_int(s, S_SOURCE);
+	strncpy(t->channel, obs_data_get_string(s, S_CHANNEL), sizeof(t->channel) - 1);
+	t->tw_flags = (obs_data_get_bool(s, S_TW_CHAT) ? WF_TW_CHAT : 0) | (obs_data_get_bool(s, S_TW_SUBS) ? WF_TW_SUBS : 0) |
+		      (obs_data_get_bool(s, S_TW_BITS) ? WF_TW_BITS : 0) | (obs_data_get_bool(s, S_TW_RAIDS) ? WF_TW_RAIDS : 0);
+	if (t->source_mode == 2 && t->channel[0])
+		wf_twitch_set(t, t->channel, t->tw_flags);
+	else
+		wf_twitch_release(t);
 
 	const char *inj = obs_data_get_string(s, S_INJECT);
 	if (inj && *inj) { /* used by the test tools and the menu's "send test toast" */
@@ -183,7 +205,8 @@ static void toast_free(struct toast *it)
 static void ts_destroy(void *data)
 {
 	struct toast_src *t = data;
-	for (int i = 0; i < MAX_TOASTS; i++)
+	wf_twitch_release(t);
+	for (int i = 0; i < NSLOT; i++)
 		toast_free(&t->items[i]);
 	if (t->http_acquired)
 		wf_notify_http_release();
@@ -206,6 +229,11 @@ static void ts_defaults(obs_data_t *s)
 	obs_data_set_default_bool(s, S_DARK, true);
 	obs_data_set_default_int(s, S_ACCENT, (int)0xFFD77800u);
 	obs_data_set_default_string(s, S_APP, "Stream Alerts");
+	obs_data_set_default_int(s, S_SOURCE, 0);
+	obs_data_set_default_bool(s, S_TW_CHAT, false);
+	obs_data_set_default_bool(s, S_TW_SUBS, true);
+	obs_data_set_default_bool(s, S_TW_BITS, true);
+	obs_data_set_default_bool(s, S_TW_RAIDS, true);
 }
 
 static bool test_clicked(obs_properties_t *props, obs_property_t *p, void *data)
@@ -223,12 +251,44 @@ static bool test_clicked(obs_properties_t *props, obs_property_t *p, void *data)
 	return false;
 }
 
+static bool source_modified(obs_properties_t *props, obs_property_t *p, obs_data_t *st)
+{
+	UNUSED_PARAMETER(p);
+	int m = (int)obs_data_get_int(st, S_SOURCE);
+	obs_property_set_visible(obs_properties_get(props, "t_help0"), m == 0);
+	obs_property_set_visible(obs_properties_get(props, "t_help1"), m == 1);
+	obs_property_set_visible(obs_properties_get(props, "t_help2"), m == 2);
+	const char *tw[] = {S_CHANNEL, S_TW_CHAT, S_TW_SUBS, S_TW_BITS, S_TW_RAIDS};
+	for (size_t i = 0; i < sizeof(tw) / sizeof(tw[0]); i++)
+		obs_property_set_visible(obs_properties_get(props, tw[i]), m == 2);
+	obs_property_set_visible(obs_properties_get(props, S_FILE), m == 1);
+	return true;
+}
+
 static obs_properties_t *ts_properties(void *data)
 {
 	obs_properties_t *p = obs_properties_create();
+	obs_property_t *src = obs_properties_add_list(p, S_SOURCE, obs_module_text("Toast.Source"), OBS_COMBO_TYPE_LIST,
+						      OBS_COMBO_FORMAT_INT);
+	obs_property_list_add_int(src, obs_module_text("Toast.Src0"), 0);
+	obs_property_list_add_int(src, obs_module_text("Toast.Src1"), 1);
+	obs_property_list_add_int(src, obs_module_text("Toast.Src2"), 2);
+	obs_property_set_modified_callback(src, source_modified);
+	obs_properties_add_text(p, "t_help0", obs_module_text("Toast.Help0"), OBS_TEXT_INFO);
+	obs_properties_add_text(p, "t_help1", obs_module_text("Toast.Help1"), OBS_TEXT_INFO);
+	obs_properties_add_text(p, "t_help2", obs_module_text("Toast.Help2"), OBS_TEXT_INFO);
+	obs_properties_add_text(p, S_CHANNEL, obs_module_text("Toast.Channel"), OBS_TEXT_DEFAULT);
+	obs_properties_add_bool(p, S_TW_CHAT, obs_module_text("Toast.TwChat"));
+	obs_properties_add_bool(p, S_TW_SUBS, obs_module_text("Toast.TwSubs"));
+	obs_properties_add_bool(p, S_TW_BITS, obs_module_text("Toast.TwBits"));
+	obs_properties_add_bool(p, S_TW_RAIDS, obs_module_text("Toast.TwRaids"));
+	obs_properties_add_path(p, S_FILE, obs_module_text("Toast.File"), OBS_PATH_FILE, "Text (*.txt *.log);;All (*.*)",
+				NULL);
 	obs_properties_add_button2(p, "t_test", obs_module_text("Toast.Test"), test_clicked, data);
 	obs_property_t *st = obs_properties_add_list(p, S_STYLE, obs_module_text("Toast.Style"), OBS_COMBO_TYPE_LIST,
 						     OBS_COMBO_FORMAT_INT);
+	obs_property_list_add_int(st, obs_module_text("Toast.S5"), 5);
+	obs_property_list_add_int(st, obs_module_text("Toast.S6"), 6);
 	obs_property_list_add_int(st, obs_module_text("Toast.S0"), 0);
 	obs_property_list_add_int(st, obs_module_text("Toast.S1"), 1);
 	obs_property_list_add_int(st, obs_module_text("Toast.S2"), 2);
@@ -246,8 +306,6 @@ static obs_properties_t *ts_properties(void *data)
 	obs_properties_add_bool(p, S_DARK, obs_module_text("Toast.Dark"));
 	obs_properties_add_color(p, S_ACCENT, obs_module_text("Toast.Accent"));
 	obs_properties_add_text(p, S_APP, obs_module_text("Toast.App"), OBS_TEXT_DEFAULT);
-	obs_properties_add_path(p, S_FILE, obs_module_text("Toast.File"), OBS_PATH_FILE, "Text (*.txt *.log);;All (*.*)",
-				NULL);
 	obs_properties_add_int(p, S_W, obs_module_text("Toast.Width"), 320, 8192, 1);
 	obs_properties_add_int(p, S_H, obs_module_text("Toast.Height"), 240, 8192, 1);
 	return p;
@@ -281,6 +339,12 @@ static struct style_layout layout_for(int style, bool dark)
 		l = (struct style_layout){364, 12, 10, 16, 6, 13, "Segoe UI", true,
 					  dark ? 0xFFFFFFFFu : 0xFF000000u, dark ? 0xFFD0D0D0u : 0xFF3C3C3Cu,
 					  dark ? 0xFFB0B0B0u : 0xFF6B6B6Bu};
+		break;
+	case 5:
+		l = (struct style_layout){340, 12, 6, 16, 8, 12, "Tahoma", true, 0xFF000000u, 0xFF000000u, 0xFFFFFFFFu};
+		break;
+	case 6:
+		l = (struct style_layout){320, 10, 9, 16, 6, 12, "Tahoma", false, 0xFF000000u, 0xFF000000u, 0};
 		break;
 	default:
 		l = (struct style_layout){372, 14, 12, 18, 6, 13, "Segoe UI", true,
@@ -320,6 +384,8 @@ static void toast_start(struct toast_src *t, struct toast *it, const struct wf_m
 	float body_h = text_h + 2.0f * pad_y;
 	if (!l.header && body_h < icon + 2.0f * pad_y)
 		body_h = icon + 2.0f * pad_y;
+	if (t->style == 5)
+		body_h += floorf(10.0f * ui);
 	it->cw = card_w;
 	it->ch = floorf(body_h);
 	it->text_x = text_x;
@@ -344,6 +410,38 @@ static void ts_tick(void *data, float seconds)
 	for (int i = 0; i < MAX_TOASTS; i++)
 		if (t->items[i].alive && now - t->items[i].born_ns > life)
 			toast_free(&t->items[i]);
+
+	/* "not set up" / "can't reach Twitch" notice in the extra slot */
+	{
+		const char *nt = NULL, *nb = NULL;
+		if (t->source_mode == 0) {
+			nt = "Toasts are not set up yet";
+			nb = "Open this source's Properties and choose an Event source.";
+		} else if (t->source_mode == 2 && !t->channel[0]) {
+			nt = "Twitch channel missing";
+			nb = "Type your channel name in this source's Properties.";
+		} else if (t->source_mode == 2 && wf_twitch_status() == WF_TW_ERROR) {
+			nt = "Can't reach Twitch chat";
+			nb = "Check your internet connection. Trying again...";
+		}
+		struct toast *sl = &t->items[MAX_TOASTS];
+		char key[96] = "";
+		if (nt)
+			snprintf(key, sizeof(key), "%s|%d", nt, t->style);
+		if (strcmp(key, t->notice_key) != 0) {
+			toast_free(sl);
+			strncpy(t->notice_key, key, sizeof(t->notice_key) - 1);
+		}
+		if (nt && !sl->alive) {
+			struct wf_msg m;
+			memset(&m, 0, sizeof(m));
+			strcpy(m.type, "info");
+			strncpy(m.title, nt, sizeof(m.title) - 1);
+			strncpy(m.text, nb, sizeof(m.text) - 1);
+			toast_start(t, sl, &m);
+			sl->sticky = true;
+		}
+	}
 
 	int active = 0;
 	for (int i = 0; i < MAX_TOASTS; i++)
@@ -391,10 +489,10 @@ static void ts_render(void *data, gs_effect_t *unused)
 	const bool bottom = (t->corner == 0 || t->corner == 1);
 
 	/* order slots newest-first from the corner */
-	int order[MAX_TOASTS], n = 0;
-	for (int pass = 0; pass < MAX_TOASTS; pass++) {
+	int order[NSLOT], n = 0;
+	for (int pass = 0; pass < NSLOT; pass++) {
 		int best = -1;
-		for (int i = 0; i < MAX_TOASTS; i++) {
+		for (int i = 0; i < NSLOT; i++) {
 			if (!t->items[i].alive)
 				continue;
 			bool used = false;
@@ -429,7 +527,7 @@ static void ts_render(void *data, gs_effect_t *unused)
 
 		float age = (float)((double)(now - it->born_ns) / 1e9);
 		float p_in = ease_out(age / 0.35f);
-		float remain = life - age;
+		float remain = it->sticky ? 1e9f : life - age;
 		float p_out = ease_out(remain / 0.35f);
 		float slide = 1.0f - fminf(p_in, p_out);
 		float travel = it->cw + edge + M;

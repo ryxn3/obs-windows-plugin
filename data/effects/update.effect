@@ -3,7 +3,8 @@
 // all text is drawn separately from GDI textures. Colours are gamma-space.
 //
 // ver: 0 Windows 2000 setup, 1 Windows 98 setup, 2 XP, 3 Vista / 7,
-//      4 Windows 8, 5 Windows 10, 6 Windows 11
+//      4 Windows 8, 5 Windows 10, 6 Windows 11, 7 Windows 95 setup,
+//      8 blue screen (Windows 10 / 11)
 
 uniform float4x4 ViewProj;
 
@@ -104,9 +105,11 @@ float4 PSUpdate(VertData v_in) : TARGET
 		// status line along the bottom edge
 		if (p.y > quad_size.y - 34.0 * u)
 			col = float3(0.753, 0.753, 0.753);
-	} else if (ver == 1) {
-		// ---- Windows 98 setup dialog on the teal desktop
+	} else if (ver == 1 || ver == 7) {
+		// ---- Windows 98 / 95 setup dialog (teal desktop, or the blue setup backdrop)
 		col = float3(0.0, 0.502, 0.502);
+		if (ver == 7)
+			col = lerp(float3(0.0, 0.0, 0.667), float3(0.0, 0.0, 0.16), saturate(p.y / quad_size.y));
 		if (inRect(p, dlg)) {
 			col = bevel(p, dlg, 1.0, float3(0.753, 0.753, 0.753), b);
 			float2 l = p - dlg.xy;
@@ -172,6 +175,9 @@ float4 PSUpdate(VertData v_in) : TARGET
 		col = float3(0.0, 0.0, 0.0);
 		float vg = saturate(1.0 - length((p - c) / quad_size) * 1.5);
 		col += float3(0.0, 0.03, 0.07) * vg;
+	} else if (ver == 8) {
+		// ---- blue screen: flat colour, no spinner
+		col = tint;
 	} else {
 		// ---- Windows 8 / 10 / 11: flat colour with a ring of dots
 		col = tint;

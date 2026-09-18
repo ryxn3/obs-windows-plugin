@@ -154,6 +154,18 @@ float4 type_icon(int k, float2 q, float size)
 	return o;
 }
 
+// Windows 9x bevel (raised window face)
+float3 bevel95(float2 p, float4 r, float3 face, float b)
+{
+	float2 l = p - r.xy;
+	float dl = l.x, dt = l.y, dr = r.z - l.x, db = r.w - l.y;
+	if (dr < b || db < b) return float3(0, 0, 0);
+	if (dl < b || dt < b) return float3(1, 1, 1);
+	if (dr < 2.0 * b || db < 2.0 * b) return float3(0.5, 0.5, 0.5);
+	if (dl < 2.0 * b || dt < 2.0 * b) return float3(0.875, 0.875, 0.875);
+	return face;
+}
+
 // point-in-triangle style tail for balloons: apex below the card
 float tail_dist(float2 p, float2 a, float2 b, float2 apex)
 {
@@ -176,6 +188,7 @@ float4 PSToast(VertData v_in) : TARGET
 	float2 ch = card.zw * 0.5;
 
 	float rad = (style == 0) ? 8.0 * ui : ((style == 1) ? 6.0 * ui : ((style == 4) ? 8.0 * ui : 0.0));
+	float bpx = max(1.0, floor(ui + 0.5));
 	float d = sdBox(p - cc, ch, rad);
 
 	// balloon tail (XP / Vista-7): small triangle under the right side of the card
@@ -193,6 +206,8 @@ float4 PSToast(VertData v_in) : TARGET
 	float sh_r = (style >= 3) ? 14.0 * ui : 9.0 * ui;
 	float sh = 1.0 - smoothstep(-sh_r * 0.3, sh_r, sdBox(p - cc - float2(0, 4.0 * ui), ch, rad));
 	float sh_a = ((style >= 3) ? 0.42 : 0.30) * sh;
+	if (style >= 5)
+		sh_a = 0.38 * cov(sdBox(p - cc - float2(3.0, 3.0) * ui, ch, 0.0));
 	out_col = float4(0, 0, 0, sh_a);
 
 	// ---- fill
@@ -216,6 +231,21 @@ float4 PSToast(VertData v_in) : TARGET
 		fill = (dark != 0) ? float4(0.122, 0.122, 0.122, 0.97) : float4(0.949, 0.949, 0.949, 0.97);
 		border = (dark != 0) ? float3(1, 1, 1) : float3(0, 0, 0);
 		border_a = 0.14;
+	} else if (style == 5) {
+		float3 bv = bevel95(p, card, float3(0.753, 0.753, 0.753), bpx);
+		fill = float4(bv, 1.0);
+		// blue title bar with the app name
+		float2 l = p - card.xy;
+		float th = 22.0 * ui;
+		if (l.x > 3.0 * bpx && l.x < card.z - 3.0 * bpx && l.y > 3.0 * bpx && l.y < 3.0 * bpx + th) {
+			float g = saturate((l.x - 3.0 * bpx) / (card.z - 6.0 * bpx));
+			fill.rgb = lerp(float3(0.0, 0.0, 0.502), float3(0.063, 0.518, 0.816), g);
+		}
+		border_a = 0.0;
+	} else if (style == 6) {
+		fill = float4(1.0, 1.0, 0.882, 1.0);
+		border = float3(0, 0, 0);
+		border_a = 1.0;
 	} else {
 		fill = (dark != 0) ? float4(0.173, 0.173, 0.173, 0.96) : float4(0.976, 0.976, 0.976, 0.96);
 		border = (dark != 0) ? float3(1, 1, 1) : float3(0, 0, 0);

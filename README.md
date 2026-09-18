@@ -476,6 +476,28 @@ XP, Vista/7, 8/8.1, 10 and 11. Progress comes from a countdown (with realistic
 stalls), a clock time ("starts at 20:00") or a manual percent, and it can show
 "Starting in 4:32". Title, message and the text at 100% are editable.
 
+### Event Source dropdown (v1.4.0)
+
+The toast source has an **Event Source** dropdown:
+
+- **Not set up yet** (default) - the overlay itself shows "Toasts are not set up yet -
+  open Properties and choose an Event Source", so you notice before going live.
+- **My own** - the test button, a watched text file, or the local web address.
+- **Twitch chat (no login needed)** - type your channel name. The plugin reads
+  the public chat anonymously and shows toasts for chat, subscriptions and gifts,
+  cheers (bits) and raids; each can be switched off. Twitch only sends *follows*
+  to a logged-in app, so use the web address with Streamer.bot for follows and
+  tips. If the connection drops, the overlay says "Can't reach Twitch chat" and
+  keeps retrying.
+
+Menu > **Toast & Assistant Setup Guide...** walks through all of this and has
+buttons to turn on the web address and copy ready-made URLs for Streamer.bot.
+
+More Windows versions: toasts now include Windows 95/98 (classic window with a
+blue title bar) and Windows 2000/Me (yellow tooltip); the update screen adds a
+Windows 95 setup screen and a Windows 10/11 blue screen ("Your device ran into a
+problem... 42% complete").
+
 ### Sending messages to toasts and the assistant
 
 1. Menu > *Camera Frame* > *Test Toast / Assistant* sends a test message.

@@ -14,6 +14,7 @@
 #include "../../src/wf-prefs.h"
 #include "../../src/wf-http.h"
 #include "../../src/wf-notify.h"
+#include "../../src/wf-twitch.h"
 #include "../../src/win-frame-filter.h"
 #include "../../src/win-frame-styles.h"
 
@@ -310,6 +311,27 @@ int main(int argc, char **argv)
 		CHECK(http_raw(17999, "GET / HTTP/1.1\r\n\r\n", resp, sizeof(resp)) < 0, "port is closed afterwards");
 		pr->http_enabled = false;
 		WSACleanup();
+	}
+
+	printf("twitch chat parser\n");
+	{
+		struct wf_msg m;
+		int all = WF_TW_CHAT | WF_TW_SUBS | WF_TW_BITS | WF_TW_RAIDS;
+		const char *chat = "@badges=;display-name=Alex;bits=0 :alex!alex@alex.tmi.twitch.tv PRIVMSG #chan :hello world";
+		CHECK(wf_twitch_parse_line(chat, all, &m) && !strcmp(m.type, "chat") && !strcmp(m.title, "Alex") &&
+			      !strcmp(m.text, "hello world"),
+		      "chat message");
+		CHECK(!wf_twitch_parse_line(chat, WF_TW_SUBS, &m), "chat is skipped when switched off");
+		const char *bits = "@bits=100;display-name=Sam :sam!sam@sam.tmi.twitch.tv PRIVMSG #chan :Cheer100 nice";
+		CHECK(wf_twitch_parse_line(bits, all, &m) && !strcmp(m.type, "donation") && strstr(m.title, "100 bits"), "cheer");
+		const char *sub = "@msg-id=resub;display-name=Riley;system-msg=Riley\\ssubscribed\\sfor\\s3\\smonths! :tmi.twitch.tv USERNOTICE #chan :love it";
+		CHECK(wf_twitch_parse_line(sub, all, &m) && !strcmp(m.type, "sub") &&
+			      strstr(m.text, "Riley subscribed for 3 months!") && strstr(m.text, "love it"),
+		      "resub with unescaped system message");
+		const char *raid = "@msg-id=raid;display-name=Pat;msg-param-viewerCount=42 :tmi.twitch.tv USERNOTICE #chan";
+		CHECK(wf_twitch_parse_line(raid, all, &m) && strstr(m.text, "42"), "raid");
+		CHECK(!wf_twitch_parse_line("PING :tmi.twitch.tv", all, &m), "ignores PING");
+		CHECK(!wf_twitch_parse_line(":tmi.twitch.tv 001 justinfan1 :Welcome", all, &m), "ignores server lines");
 	}
 
 	printf("update check\n");

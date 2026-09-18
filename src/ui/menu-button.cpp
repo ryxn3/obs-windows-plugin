@@ -79,6 +79,8 @@ static void build_menu(QMainWindow *win)
 
 	g_menu->addSeparator();
 
+	QAction *guide = g_menu->addAction("Toast && Assistant Setup Guide...");
+	QObject::connect(guide, &QAction::triggered, win, []() { wf_ui_show_toast_guide(); });
 	QMenu *tests = g_menu->addMenu("Test Toast / Assistant");
 	QAction *tt = tests->addAction("Send Test Toast");
 	QObject::connect(tt, &QAction::triggered, win, []() {
