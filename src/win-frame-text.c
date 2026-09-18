@@ -6,6 +6,7 @@
 #include <windows.h>
 #include <string.h>
 #include <stdlib.h>
+#include <math.h>
 
 gs_texture_t *win_frame_render_text_texture(const char *text, const char *font_name, int font_size_px,
 					     bool bold, uint32_t color_abgr, uint32_t *out_w, uint32_t *out_h)
@@ -208,13 +209,146 @@ gs_texture_t *win_frame_render_text_atlas(const char *const *lines, int count, c
 
 /* ---- word-wrapped block ------------------------------------------------- */
 
+/* Inline images (emotes): the body may contain private-use characters
+ * U+E000 + k, each standing for images[k]. They are as wide as the image
+ * scaled to g_img_h and are drawn after the text. */
+static const struct wf_inline_img *g_img;
+static int g_nimg, g_img_h;
+
+static int img_index(wchar_t c)
+{
+	return (g_nimg > 0 && c >= 0xE000 && c < 0xE000 + g_nimg) ? (int)(c - 0xE000) : -1;
+}
+
+static int img_width(int k)
+{
+	if (!g_img[k].rgba || !g_img[k].w || !g_img[k].h)
+		return g_img_h;
+	int w = (int)((long long)g_img[k].w * g_img_h / g_img[k].h);
+	if (w < 4)
+		w = 4;
+	if (w > g_img_h * 4)
+		w = g_img_h * 4;
+	return w;
+}
+
 static int measure_w(HDC dc, const wchar_t *s, int len)
 {
 	SIZE sz = {0, 0};
 	if (len <= 0)
 		return 0;
-	GetTextExtentPoint32W(dc, s, len, &sz);
-	return sz.cx;
+	if (g_nimg == 0) {
+		GetTextExtentPoint32W(dc, s, len, &sz);
+		return sz.cx;
+	}
+	int total = 0, run = 0;
+	for (int i = 0; i <= len; i++) {
+		int k = i < len ? img_index(s[i]) : -1;
+		if (i == len || k >= 0) {
+			if (i > run) {
+				GetTextExtentPoint32W(dc, s + run, i - run, &sz);
+				total += sz.cx;
+			}
+			if (k >= 0)
+				total += img_width(k);
+			run = i + 1;
+		}
+	}
+	return total;
+}
+
+struct img_place {
+	int k, x, y;
+};
+static struct img_place g_places[96];
+static int g_nplaces;
+
+/* draws one line at (x,y) (top of a lh-high row), recording image positions */
+static void draw_line(HDC dc, int x, int y, int lh, int text_h, const wchar_t *s, int len)
+{
+	int run = 0;
+	const int ty = y + (lh - text_h) / 2;
+	for (int i = 0; i <= len; i++) {
+		int k = i < len ? img_index(s[i]) : -1;
+		if (i == len || k >= 0) {
+			if (i > run) {
+				SIZE sz;
+				TextOutW(dc, x, ty, s + run, i - run);
+				GetTextExtentPoint32W(dc, s + run, i - run, &sz);
+				x += sz.cx;
+			}
+			if (k >= 0) {
+				int w = img_width(k);
+				if (g_nplaces < 96) {
+					g_places[g_nplaces].k = k;
+					g_places[g_nplaces].x = x;
+					g_places[g_nplaces].y = y + (lh - g_img_h) / 2;
+					g_nplaces++;
+				}
+				x += w;
+			}
+			run = i + 1;
+		}
+	}
+}
+
+/* bilinear-scaled "over" blend of a straight-alpha RGBA image into px */
+static void blit_img(uint8_t *px, int W, int H, int dx, int dy, int k)
+{
+	const struct wf_inline_img *im = &g_img[k];
+	if (!im->rgba || !im->w || !im->h)
+		return;
+	int dw = img_width(k), dh = g_img_h;
+	for (int y = 0; y < dh; y++) {
+		int oy = dy + y;
+		if (oy < 0 || oy >= H)
+			continue;
+		float fy = ((float)y + 0.5f) * (float)im->h / (float)dh - 0.5f;
+		int y0 = (int)floorf(fy);
+		float ty = fy - (float)y0;
+		int y1 = y0 + 1;
+		y0 = y0 < 0 ? 0 : (y0 >= (int)im->h ? (int)im->h - 1 : y0);
+		y1 = y1 < 0 ? 0 : (y1 >= (int)im->h ? (int)im->h - 1 : y1);
+		for (int x = 0; x < dw; x++) {
+			int ox = dx + x;
+			if (ox < 0 || ox >= W)
+				continue;
+			float fx = ((float)x + 0.5f) * (float)im->w / (float)dw - 0.5f;
+			int x0 = (int)floorf(fx);
+			float tx = fx - (float)x0;
+			int x1 = x0 + 1;
+			x0 = x0 < 0 ? 0 : (x0 >= (int)im->w ? (int)im->w - 1 : x0);
+			x1 = x1 < 0 ? 0 : (x1 >= (int)im->w ? (int)im->w - 1 : x1);
+			const uint8_t *p00 = im->rgba + ((size_t)y0 * im->w + x0) * 4;
+			const uint8_t *p10 = im->rgba + ((size_t)y0 * im->w + x1) * 4;
+			const uint8_t *p01 = im->rgba + ((size_t)y1 * im->w + x0) * 4;
+			const uint8_t *p11 = im->rgba + ((size_t)y1 * im->w + x1) * 4;
+			float c[4];
+			/* interpolate premultiplied so transparent edges do not bleed dark */
+			float a = 0, r = 0, g = 0, b = 0;
+			const uint8_t *pp[4] = {p00, p10, p01, p11};
+			float wt[4] = {(1 - tx) * (1 - ty), tx * (1 - ty), (1 - tx) * ty, tx * ty};
+			for (int q = 0; q < 4; q++) {
+				float pa = pp[q][3] / 255.0f * wt[q];
+				a += pa;
+				r += pp[q][0] * pa;
+				g += pp[q][1] * pa;
+				b += pp[q][2] * pa;
+			}
+			if (a <= 0.001f)
+				continue;
+			c[0] = r / a;
+			c[1] = g / a;
+			c[2] = b / a;
+			c[3] = a;
+			uint8_t *d = px + ((size_t)oy * W + ox) * 4;
+			float da = d[3] / 255.0f;
+			float oa = c[3] + da * (1.0f - c[3]);
+			for (int q = 0; q < 3; q++)
+				d[q] = (uint8_t)((c[q] * c[3] + d[q] * da * (1.0f - c[3])) / oa + 0.5f);
+			d[3] = (uint8_t)(oa * 255.0f + 0.5f);
+		}
+	}
 }
 
 /* greedy word wrap; lines[i] = {start, len}; len < 0 marks "needs ellipsis" */
@@ -252,10 +386,11 @@ static int wrap_lines(HDC dc, const wchar_t *s, int max_w, int (*lines)[2], int 
 	return n;
 }
 
-gs_texture_t *win_frame_render_text_wrapped(const char *header, int header_indent, const char *title,
-					     const char *body, const char *font_name, int font_px, int max_w,
-					     int max_body_lines, uint32_t header_abgr, uint32_t title_abgr,
-					     uint32_t body_abgr, int reveal_chars, uint32_t *out_w, uint32_t *out_h)
+gs_texture_t *win_frame_render_text_wrapped_img(const char *header, int header_indent, const char *title,
+						 const char *body, const char *font_name, int font_px, int max_w,
+						 int max_body_lines, uint32_t header_abgr, uint32_t title_abgr,
+						 uint32_t body_abgr, int reveal_chars, const struct wf_inline_img *images,
+						 int nimages, uint32_t *out_w, uint32_t *out_h)
 {
 	if (out_w)
 		*out_w = 0;
@@ -263,6 +398,10 @@ gs_texture_t *win_frame_render_text_wrapped(const char *header, int header_inden
 		*out_h = 0;
 	if (font_px < 6 || max_w < 20)
 		return NULL;
+	g_img = images;
+	g_nimg = images ? nimages : 0;
+	g_img_h = (int)(font_px * 1.55f);
+	g_nplaces = 0;
 	if (max_body_lines < 1)
 		max_body_lines = 1;
 	if (max_body_lines > 12)
@@ -292,7 +431,10 @@ gs_texture_t *win_frame_render_text_wrapped(const char *header, int header_inden
 	TEXTMETRICW tm;
 	HFONT old = (HFONT)SelectObject(dc, f_body);
 	GetTextMetricsW(dc, &tm);
-	const int lh_body = tm.tmHeight;
+	const int text_h_body = tm.tmHeight;
+	int lh_body = tm.tmHeight;
+	if (g_nimg > 0 && g_img_h + 2 > lh_body)
+		lh_body = g_img_h + 2;
 	SelectObject(dc, f_title);
 	GetTextMetricsW(dc, &tm);
 	const int lh_title = tm.tmHeight;
@@ -401,7 +543,7 @@ gs_texture_t *win_frame_render_text_wrapped(const char *header, int header_inden
 				buf[draw] = 0;
 				if (cut && draw == len)
 					wcscat_s(buf, 200, L"...");
-				TextOutW(dc, pad, pad + y_body + i * lh_body, buf, (int)wcslen(buf));
+				draw_line(dc, pad, pad + y_body + i * lh_body, lh_body, text_h_body, buf, (int)wcslen(buf));
 				left -= len + 1;
 			}
 		}
@@ -428,6 +570,8 @@ gs_texture_t *win_frame_render_text_wrapped(const char *header, int header_inden
 					px[i * 4 + 3] = (uint8_t)((src[i * 4 + 1] * ca) / 255);
 				}
 			}
+			for (int q = 0; q < g_nplaces; q++)
+				blit_img(px, w, h, g_places[q].x, g_places[q].y, g_places[q].k);
 			obs_enter_graphics();
 			const uint8_t *planes[1] = {px};
 			tex = gs_texture_create((uint32_t)w, (uint32_t)h, GS_RGBA, 1, planes, 0);
@@ -448,9 +592,20 @@ gs_texture_t *win_frame_render_text_wrapped(const char *header, int header_inden
 	DeleteObject(f_title);
 	DeleteObject(f_head);
 	DeleteDC(dc);
+	g_img = NULL;
+	g_nimg = 0;
 	return tex;
 }
 
+gs_texture_t *win_frame_render_text_wrapped(const char *header, int header_indent, const char *title,
+					     const char *body, const char *font_name, int font_px, int max_w,
+					     int max_body_lines, uint32_t header_abgr, uint32_t title_abgr,
+					     uint32_t body_abgr, int reveal_chars, uint32_t *out_w, uint32_t *out_h)
+{
+	return win_frame_render_text_wrapped_img(header, header_indent, title, body, font_name, font_px, max_w,
+						 max_body_lines, header_abgr, title_abgr, body_abgr, reveal_chars, NULL, 0,
+						 out_w, out_h);
+}
 
 #else
 

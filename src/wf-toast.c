@@ -15,6 +15,7 @@
 #include "win-frame-text.h"
 #include "wf-notify.h"
 #include "wf-twitch.h"
+#include "wf-emotes.h"
 
 #define S_W "t_width"
 #define S_H "t_height"
@@ -34,6 +35,9 @@
 #define S_TW_SUBS "t_tw_subs"
 #define S_TW_BITS "t_tw_bits"
 #define S_TW_RAIDS "t_tw_raids"
+#define S_TW_EMOTES "t_tw_emotes"
+#define S_TW_7TV "t_tw_7tv"
+#define S_TW_BTTV "t_tw_bttv"
 
 #define MAX_TOASTS 4
 #define NSLOT (MAX_TOASTS + 1) /* the last slot holds the "not set up" notice */
@@ -52,6 +56,8 @@ enum {
 struct toast {
 	bool alive;
 	bool sticky;
+	bool emotes_pending;
+	unsigned emote_gen;
 	uint64_t born_ns;
 	struct wf_msg msg;
 	int kind;
@@ -147,7 +153,9 @@ static void ts_update(void *data, obs_data_t *s)
 	t->source_mode = (int)obs_data_get_int(s, S_SOURCE);
 	strncpy(t->channel, obs_data_get_string(s, S_CHANNEL), sizeof(t->channel) - 1);
 	t->tw_flags = (obs_data_get_bool(s, S_TW_CHAT) ? WF_TW_CHAT : 0) | (obs_data_get_bool(s, S_TW_SUBS) ? WF_TW_SUBS : 0) |
-		      (obs_data_get_bool(s, S_TW_BITS) ? WF_TW_BITS : 0) | (obs_data_get_bool(s, S_TW_RAIDS) ? WF_TW_RAIDS : 0);
+		      (obs_data_get_bool(s, S_TW_BITS) ? WF_TW_BITS : 0) | (obs_data_get_bool(s, S_TW_RAIDS) ? WF_TW_RAIDS : 0) |
+		      (obs_data_get_bool(s, S_TW_EMOTES) ? WF_TW_EMOTES : 0) | (obs_data_get_bool(s, S_TW_7TV) ? WF_TW_7TV : 0) |
+		      (obs_data_get_bool(s, S_TW_BTTV) ? WF_TW_BTTV : 0);
 	if (t->source_mode == 2 && t->channel[0])
 		wf_twitch_set(t, t->channel, t->tw_flags);
 	else
@@ -234,6 +242,9 @@ static void ts_defaults(obs_data_t *s)
 	obs_data_set_default_bool(s, S_TW_SUBS, true);
 	obs_data_set_default_bool(s, S_TW_BITS, true);
 	obs_data_set_default_bool(s, S_TW_RAIDS, true);
+	obs_data_set_default_bool(s, S_TW_EMOTES, true);
+	obs_data_set_default_bool(s, S_TW_7TV, true);
+	obs_data_set_default_bool(s, S_TW_BTTV, true);
 }
 
 static bool test_clicked(obs_properties_t *props, obs_property_t *p, void *data)
@@ -258,7 +269,7 @@ static bool source_modified(obs_properties_t *props, obs_property_t *p, obs_data
 	obs_property_set_visible(obs_properties_get(props, "t_help0"), m == 0);
 	obs_property_set_visible(obs_properties_get(props, "t_help1"), m == 1);
 	obs_property_set_visible(obs_properties_get(props, "t_help2"), m == 2);
-	const char *tw[] = {S_CHANNEL, S_TW_CHAT, S_TW_SUBS, S_TW_BITS, S_TW_RAIDS};
+	const char *tw[] = {S_CHANNEL, S_TW_CHAT, S_TW_SUBS, S_TW_BITS, S_TW_RAIDS, S_TW_EMOTES, S_TW_7TV, S_TW_BTTV};
 	for (size_t i = 0; i < sizeof(tw) / sizeof(tw[0]); i++)
 		obs_property_set_visible(obs_properties_get(props, tw[i]), m == 2);
 	obs_property_set_visible(obs_properties_get(props, S_FILE), m == 1);
@@ -282,6 +293,9 @@ static obs_properties_t *ts_properties(void *data)
 	obs_properties_add_bool(p, S_TW_SUBS, obs_module_text("Toast.TwSubs"));
 	obs_properties_add_bool(p, S_TW_BITS, obs_module_text("Toast.TwBits"));
 	obs_properties_add_bool(p, S_TW_RAIDS, obs_module_text("Toast.TwRaids"));
+	obs_properties_add_bool(p, S_TW_EMOTES, obs_module_text("Toast.TwEmotes"));
+	obs_properties_add_bool(p, S_TW_7TV, obs_module_text("Toast.Tw7tv"));
+	obs_properties_add_bool(p, S_TW_BTTV, obs_module_text("Toast.TwBttv"));
 	obs_properties_add_path(p, S_FILE, obs_module_text("Toast.File"), OBS_PATH_FILE, "Text (*.txt *.log);;All (*.*)",
 				NULL);
 	obs_properties_add_button2(p, "t_test", obs_module_text("Toast.Test"), test_clicked, data);
@@ -355,6 +369,8 @@ static struct style_layout layout_for(int style, bool dark)
 	return l;
 }
 
+static void toast_build(struct toast_src *t, struct toast *it);
+
 static void toast_start(struct toast_src *t, struct toast *it, const struct wf_msg *m)
 {
 	memset(it, 0, sizeof(*it));
@@ -362,7 +378,19 @@ static void toast_start(struct toast_src *t, struct toast *it, const struct wf_m
 	it->born_ns = os_gettime_ns();
 	it->msg = *m;
 	it->kind = kind_of(m->type);
+	toast_build(t, it);
+}
 
+/* (Re)creates the text texture and card geometry from it->msg. */
+static void toast_build(struct toast_src *t, struct toast *it)
+{
+	const struct wf_msg *m = &it->msg;
+	if (it->tex) {
+		obs_enter_graphics();
+		gs_texture_destroy(it->tex);
+		obs_leave_graphics();
+		it->tex = NULL;
+	}
 	const float ui = t->scale;
 	struct style_layout l = layout_for(t->style, t->dark);
 	const float card_w = floorf(l.card_w * ui);
@@ -377,9 +405,21 @@ static void toast_start(struct toast_src *t, struct toast *it, const struct wf_m
 		text_x = pad_x + icon + floorf(l.gap * ui);
 	}
 	int max_w = (int)(card_w - text_x - pad_x);
-	it->tex = win_frame_render_text_wrapped(l.header ? (t->app[0] ? t->app : "Notification") : NULL, header_indent,
-						m->title, m->text, l.font, (int)floorf(l.px * ui), max_w, 3, l.head, l.title,
-						l.body, -1, &it->tw, &it->th);
+	struct wf_inline_img imgs[12];
+	int nimg = m->nemote > 12 ? 12 : m->nemote;
+	it->emotes_pending = false;
+	it->emote_gen = wf_emotes_generation();
+	for (int k = 0; k < nimg; k++) {
+		memset(&imgs[k], 0, sizeof(imgs[k]));
+		int st = wf_emote_get(m->emote[k], &imgs[k].w, &imgs[k].h, &imgs[k].rgba);
+		if (st == 0)
+			it->emotes_pending = true;
+		else if (st != 1)
+			imgs[k].rgba = NULL;
+	}
+	it->tex = win_frame_render_text_wrapped_img(l.header ? (t->app[0] ? t->app : "Notification") : NULL,
+						    header_indent, m->title, m->text, l.font, (int)floorf(l.px * ui), max_w,
+						    3, l.head, l.title, l.body, -1, imgs, nimg, &it->tw, &it->th);
 	float text_h = it->th ? (float)it->th - 2.0f * WF_TEXT_PAD : 16.0f;
 	float body_h = text_h + 2.0f * pad_y;
 	if (!l.header && body_h < icon + 2.0f * pad_y)
@@ -404,6 +444,15 @@ static void ts_tick(void *data, float seconds)
 	if (now - t->last_poll_ns > 400000000ULL) {
 		t->last_poll_ns = now;
 		wf_filetail_poll(&t->tail, WF_TARGET_TOAST);
+	}
+
+	{
+		unsigned gen = wf_emotes_generation();
+		for (int i = 0; i < MAX_TOASTS; i++) {
+			struct toast *it = &t->items[i];
+			if (it->alive && it->emotes_pending && it->emote_gen != gen && now - it->born_ns < 8000000000ULL)
+				toast_build(t, it);
+		}
 	}
 
 	const uint64_t life = (uint64_t)(t->seconds * 1e9);

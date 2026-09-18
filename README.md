@@ -490,6 +490,13 @@ The toast source has an **Event Source** dropdown:
   tips. If the connection drops, the overlay says "Can't reach Twitch chat" and
   keeps retrying.
 
+**Emotes (v1.5.0):** Twitch chat toasts show emotes inline - Twitch's own, **7TV**
+and **BetterTTV** (each has its own switch). The plugin downloads the channel's
+7TV / BetterTTV lists and the emote images in the background and caches them;
+a toast that arrives before an image has loaded updates itself when it is ready.
+Animated emotes are shown as a still picture. FrankerFaceZ emotes are not
+supported yet.
+
 Menu > **Toast & Assistant Setup Guide...** walks through all of this and has
 buttons to turn on the web address and copy ready-made URLs for Streamer.bot.
 

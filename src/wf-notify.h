@@ -14,6 +14,10 @@ struct wf_msg {
 	char type[16];
 	char title[96];
 	char text[400];
+	/* Chat emotes: text may contain U+E000 + k characters (UTF-8 EE 80 80+k)
+	 * standing for emote[k], a tag such as "T:25", "7:<id>" or "B:<id>". */
+	int nemote;
+	char emote[12][40];
 };
 
 enum { WF_TARGET_TOAST = 0, WF_TARGET_ASSISTANT = 1, WF_TARGET_COUNT };

@@ -7,6 +7,7 @@
 #include <util/base.h>
 #include "win-frame-presets.h"
 #include "ui/menu-button.h"
+#include "wf-emotes.h"
 
 #ifndef WF_PLUGIN_VERSION
 #define WF_PLUGIN_VERSION "unknown"
@@ -37,6 +38,7 @@ bool obs_module_load(void)
 void obs_module_unload(void)
 {
 	wf_ui_shutdown();
+	wf_emotes_shutdown();
 	blog(LOG_INFO, "[win-frame-filter] plugin unloaded");
 }
 

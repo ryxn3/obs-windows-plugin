@@ -4,6 +4,7 @@
  * download error handling and update-check parsing.
  */
 #include <winsock2.h>
+#include <objbase.h>
 #include <ws2tcpip.h>
 #include <obs.h>
 #include <util/base.h>
@@ -15,6 +16,7 @@
 #include "../../src/wf-http.h"
 #include "../../src/wf-notify.h"
 #include "../../src/wf-twitch.h"
+#include "../../src/wf-emotes.h"
 #include "../../src/win-frame-filter.h"
 #include "../../src/win-frame-styles.h"
 
@@ -332,6 +334,32 @@ int main(int argc, char **argv)
 		CHECK(wf_twitch_parse_line(raid, all, &m) && strstr(m.text, "42"), "raid");
 		CHECK(!wf_twitch_parse_line("PING :tmi.twitch.tv", all, &m), "ignores PING");
 		CHECK(!wf_twitch_parse_line(":tmi.twitch.tv 001 justinfan1 :Welcome", all, &m), "ignores server lines");
+	}
+
+	printf("emotes\n");
+	{
+		struct wf_msg m;
+		int all = WF_TW_CHAT | WF_TW_EMOTES | WF_TW_7TV | WF_TW_BTTV;
+		const char *nat = "@display-name=Alex;emotes=25:0-4,9-13 :a!a@a.tmi.twitch.tv PRIVMSG #c :Kappa hi Kappa";
+		CHECK(wf_twitch_parse_line(nat, all, &m), "chat with Twitch emotes parses");
+		CHECK(m.nemote == 2 && !strcmp(m.emote[0], "T:25") && !strcmp(m.emote[1], "T:25"), "both Kappa emotes found by position");
+		CHECK((unsigned char)m.text[0] == 0xEE && (unsigned char)m.text[2] == 0x80 && strstr(m.text, " hi ") != NULL &&
+			      (unsigned char)m.text[7] == 0xEE && (unsigned char)m.text[9] == 0x81,
+		      "emote words become placeholder characters");
+		CHECK(wf_twitch_parse_line(nat, WF_TW_CHAT, &m) && m.nemote == 0 && !strcmp(m.text, "Kappa hi Kappa"), "emotes stay as text when switched off");
+		const char *act = "@display-name=Alex;emotes=25:8-12 :a!a@a.tmi.twitch.tv PRIVMSG #c :\x01" "ACTION Kappa\x01";
+		CHECK(wf_twitch_parse_line(act, all, &m) && m.nemote == 1, "positions still line up after /me");
+		const char *utf = "@display-name=Alex;emotes=25:3-7 :a!a@a.tmi.twitch.tv PRIVMSG #c :\xC3\xA9\xC3\xA9 Kappa";
+		CHECK(wf_twitch_parse_line(utf, all, &m) && m.nemote == 1, "positions count characters, not bytes");
+
+		static const unsigned char png[] = {137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 1, 0, 0, 0, 1, 8, 6, 0, 0, 0, 31, 21, 196, 137, 0, 0, 0, 13, 73, 68, 65, 84, 120, 156, 99, 248, 207, 192, 208, 0, 0, 4, 129, 1, 128, 44, 85, 206, 176, 0, 0, 0, 0, 73, 69, 78, 68, 174, 66, 96, 130};
+		CoInitializeEx(NULL, COINIT_MULTITHREADED);
+		uint32_t w = 0, h = 0;
+		uint8_t *px = wf_emote_decode(png, sizeof(png), &w, &h);
+		CHECK(px && w == 1 && h == 1, "decodes a PNG");
+		CHECK(px && px[0] == 255 && px[1] == 0 && px[2] == 0 && px[3] >= 127 && px[3] <= 129, "straight (not premultiplied) RGBA");
+		free(px);
+		CHECK(wf_emote_decode((const uint8_t *)"not an image", 12, &w, &h) == NULL, "garbage is rejected");
 	}
 
 	printf("update check\n");

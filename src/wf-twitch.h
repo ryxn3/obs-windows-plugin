@@ -15,6 +15,9 @@ enum {
 	WF_TW_SUBS = 2,
 	WF_TW_BITS = 4,
 	WF_TW_RAIDS = 8,
+	WF_TW_EMOTES = 16, /* Twitch's own emotes */
+	WF_TW_7TV = 32,
+	WF_TW_BTTV = 64,
 };
 
 enum { WF_TW_OFF = 0, WF_TW_CONNECTING = 1, WF_TW_CONNECTED = 2, WF_TW_ERROR = 3 };

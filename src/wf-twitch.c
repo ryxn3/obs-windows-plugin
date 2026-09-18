@@ -6,6 +6,7 @@
 #include <util/platform.h>
 #include "wf-twitch.h"
 #include "wf-notify.h"
+#include "wf-emotes.h"
 
 /* ---------------------------------------------------------------- parser */
 
@@ -50,6 +51,101 @@ static void copy_to(char *dst, size_t n, const char *src)
 	dst[i] = 0;
 }
 
+/* Copies `text` into m->text, replacing emote words by placeholder characters
+ * and filling m->emote[]. `emotes_tag` is Twitch's "id:0-4,6-10/id2:.." value
+ * (positions count characters of the original message, cp_offset skips a
+ * stripped prefix). */
+struct nat_emote {
+	int start, end;
+	char id[20];
+};
+
+static void put_placeholder(char *dst, size_t n, size_t *o, int k)
+{
+	if (*o + 3 < n) {
+		dst[(*o)++] = (char)0xEE;
+		dst[(*o)++] = (char)0x80;
+		dst[(*o)++] = (char)(0x80 + k);
+	}
+}
+
+static void encode_emotes(const char *text, const char *emotes_tag, int cp_offset, int flags, struct wf_msg *m)
+{
+	struct nat_emote nat[40];
+	int nn = 0;
+	if ((flags & WF_TW_EMOTES) && emotes_tag && *emotes_tag) {
+		const char *p = emotes_tag;
+		while (*p && nn < 40) {
+			char id[20];
+			int il = 0;
+			while (*p && *p != ':' && il < 19)
+				id[il++] = *p++;
+			id[il] = 0;
+			if (*p == ':')
+				p++;
+			while (*p && *p != '/') {
+				int a = 0, b = 0;
+				if (sscanf(p, "%d-%d", &a, &b) == 2 && nn < 40) {
+					nat[nn].start = a - cp_offset;
+					nat[nn].end = b - cp_offset;
+					strcpy(nat[nn].id, id);
+					nn++;
+				}
+				while (*p && *p != ',' && *p != '/')
+					p++;
+				if (*p == ',')
+					p++;
+			}
+			if (*p == '/')
+				p++;
+		}
+	}
+	const bool names = (flags & (WF_TW_7TV | WF_TW_BTTV)) != 0;
+	char out[sizeof(m->text)];
+	size_t o = 0;
+	m->nemote = 0;
+	int cp = 0;
+	const char *c = text;
+	while (*c && o < sizeof(out) - 4) {
+		if (*c == ' ' || *c == '\r' || *c == '\n') {
+			out[o++] = ' ';
+			c++;
+			cp++;
+			continue;
+		}
+		const char *w = c;
+		int wcp = cp;
+		while (*c && *c != ' ' && *c != '\r' && *c != '\n') {
+			if (((unsigned char)*c & 0xC0) != 0x80)
+				cp++;
+			c++;
+		}
+		size_t wl = (size_t)(c - w);
+		char tag[40] = "";
+		for (int i = 0; i < nn; i++)
+			if (nat[i].start == wcp) {
+				snprintf(tag, sizeof(tag), "T:%s", nat[i].id);
+				break;
+			}
+		if (!tag[0] && names && wl < 32) {
+			char word[32];
+			memcpy(word, w, wl);
+			word[wl] = 0;
+			wf_emote_find_name(word, tag, sizeof(tag));
+		}
+		if (tag[0] && m->nemote < 12) {
+			snprintf(m->emote[m->nemote], sizeof(m->emote[0]), "%s", tag);
+			put_placeholder(out, sizeof(out), &o, m->nemote);
+			m->nemote++;
+		} else {
+			for (size_t i = 0; i < wl && o < sizeof(out) - 4; i++)
+				out[o++] = w[i];
+		}
+	}
+	out[o] = 0;
+	memcpy(m->text, out, o + 1);
+}
+
 bool wf_twitch_parse_line(const char *line, int flags, struct wf_msg *out)
 {
 	memset(out, 0, sizeof(*out));
@@ -90,21 +186,35 @@ bool wf_twitch_parse_line(const char *line, int flags, struct wf_msg *out)
 				return false;
 			strcpy(out->type, "donation");
 			snprintf(out->title, sizeof(out->title), "%s cheered %d bits", name, atoi(val));
-			copy_to(out->text, sizeof(out->text), msgtext);
+			{
+				char plain[sizeof(out->text)], et[400] = "";
+				copy_to(plain, sizeof(plain), msgtext);
+				tag_get(line, "emotes", et, sizeof(et));
+				encode_emotes(plain, et, 0, flags, out);
+			}
 			if (!out->text[0])
 				strcpy(out->text, "Thank you!");
 			return true;
 		}
 		if (!(flags & WF_TW_CHAT))
 			return false;
-		if (!strncmp(msgtext, "\x01" "ACTION ", 8))
+		int cp_off = 0;
+		if (!strncmp(msgtext, "\x01" "ACTION ", 8)) {
 			msgtext += 8;
+			cp_off = 8;
+		}
 		strcpy(out->type, "chat");
 		copy_to(out->title, sizeof(out->title), name);
-		copy_to(out->text, sizeof(out->text), msgtext);
-		size_t l = strlen(out->text);
-		if (l && out->text[l - 1] == '\x01')
-			out->text[l - 1] = 0;
+		char plain[sizeof(out->text)];
+		copy_to(plain, sizeof(plain), msgtext);
+		size_t l = strlen(plain);
+		if (l && plain[l - 1] == '\x01')
+			plain[l - 1] = 0;
+		char et[400] = "", room[24] = "";
+		tag_get(line, "emotes", et, sizeof(et));
+		if (tag_get(line, "room-id", room, sizeof(room)))
+			wf_emotes_set_channel(room, flags);
+		encode_emotes(plain, et, cp_off, flags, out);
 		return out->text[0] != 0;
 	}
 
