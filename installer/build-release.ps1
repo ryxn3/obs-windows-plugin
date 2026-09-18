@@ -35,7 +35,7 @@ Remove-Item $stage -Recurse -Force
 
 $hash = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLower()
 "$hash  $(Split-Path $zip -Leaf)" | Set-Content "$zip.sha256" -Encoding ascii
-@{ version = $ver; url = "https://github.com/$Repo/releases/latest" } | ConvertTo-Json | Set-Content "$dist\update.json" -Encoding ascii
+@{ version = $ver; url = "https://github.com/$Repo/releases/latest" } | ConvertTo-Json | Set-Content "$root\update.json" -Encoding ascii
 
 if (-not (Test-Path $Iscc)) { throw "Inno Setup 6 not found at $Iscc (winget install JRSoftware.InnoSetup)" }
 & $Iscc "/DAppVersion=$ver" "/DGitHubRepo=$Repo" "/DPluginSha256=$hash" "$PSScriptRoot\win-frame-filter.iss"

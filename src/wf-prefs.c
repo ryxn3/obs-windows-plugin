@@ -3,6 +3,10 @@
 #include <util/platform.h>
 #include "wf-prefs.h"
 
+#ifndef WF_DEFAULT_UPDATE_URL
+#define WF_DEFAULT_UPDATE_URL ""
+#endif
+
 static struct wf_prefs g_prefs;
 static bool g_loaded = false;
 
@@ -18,6 +22,7 @@ static void set_defaults(void)
 {
 	memset(&g_prefs, 0, sizeof(g_prefs));
 	copy_str(g_prefs.default_style, sizeof(g_prefs.default_style), "winxp_luna");
+	copy_str(g_prefs.update_url, sizeof(g_prefs.update_url), WF_DEFAULT_UPDATE_URL);
 }
 
 static char *prefs_path(void)
@@ -54,7 +59,9 @@ void wf_prefs_load(void)
 	const char *v = obs_data_get_string(d, "default_style");
 	if (v && *v)
 		copy_str(g_prefs.default_style, sizeof(g_prefs.default_style), v);
-	copy_str(g_prefs.update_url, sizeof(g_prefs.update_url), obs_data_get_string(d, "update_url"));
+	v = obs_data_get_string(d, "update_url");
+	if (v && *v) /* an empty saved value keeps the built-in default */
+		copy_str(g_prefs.update_url, sizeof(g_prefs.update_url), v);
 	copy_str(g_prefs.download_url, sizeof(g_prefs.download_url), obs_data_get_string(d, "download_url"));
 	g_prefs.welcome_shown = obs_data_get_bool(d, "welcome_shown");
 	obs_data_release(d);

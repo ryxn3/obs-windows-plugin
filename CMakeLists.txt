@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.20)
 
-project(win-frame-filter VERSION 1.1.0 LANGUAGES C CXX)
+project(win-frame-filter VERSION 1.1.1 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -45,7 +45,9 @@ add_library(win-frame-filter MODULE
 	src/ui/dialogs.cpp
 )
 
-target_compile_definitions(win-frame-filter PRIVATE WF_PLUGIN_VERSION="${PROJECT_VERSION}")
+# Where "Check for Updates" looks by default (a small JSON file: {"version","url"}).
+set(WF_UPDATE_URL "https://raw.githubusercontent.com/ryxn3/obs-windows-plugin/main/update.json" CACHE STRING "Default update-check URL")
+target_compile_definitions(win-frame-filter PRIVATE WF_PLUGIN_VERSION="${PROJECT_VERSION}" WF_DEFAULT_UPDATE_URL="${WF_UPDATE_URL}")
 
 # OBS frontend API + Qt6 (for the menu-bar button). Both come from the same
 # OBS build tree / deps bundle used to build libobs:
