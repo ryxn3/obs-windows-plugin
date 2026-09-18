@@ -16,10 +16,12 @@ OBS_DECLARE_MODULE()
 OBS_MODULE_USE_DEFAULT_LOCALE("win-frame-filter", "en-US")
 
 extern struct obs_source_info win_frame_filter_info;
+extern struct obs_source_info win_alttab_transition_info;
 
 bool obs_module_load(void)
 {
 	obs_register_source(&win_frame_filter_info);
+	obs_register_source(&win_alttab_transition_info);
 	win_frame_presets_seed_builtin();
 	wf_ui_init();
 	blog(LOG_INFO, "[win-frame-filter] plugin loaded (version %s)", WF_PLUGIN_VERSION);

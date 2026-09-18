@@ -431,6 +431,30 @@ its limits, download/update-check error handling, and the properties panel
 (including the style-change callbacks). The Qt dialogs and menu are compiled
 but have not been driven in a live OBS window.
 
+## 5f. "Windows Alt+Tab" scene transition
+
+A second plugin feature, separate from the frame filter: a **scene transition**
+that looks like the Windows Alt+Tab switcher. In OBS, open the *Scene
+Transitions* dock, click **+**, and choose **Windows Alt+Tab**; use the gear
+icon for its settings.
+
+While it plays, the outgoing scene is dimmed, an Alt+Tab switcher appears, the
+selection steps across the window list to the new scene (the two scenes are
+shown as live thumbnails, extra windows are decoys), and then the new scene is
+revealed.
+
+- **Windows Version:** 95/98/2000/XP (icon box), Vista/7 (glass), 8/8.1,
+  10, or 11.
+- **Total Time (ms):** the length of the whole transition. OBS shows the
+  duration as fixed to this value while the transition is selected.
+- **Pause On New Window (%):** how long the highlight rests on the new scene
+  before the overlay fades.
+- Also: number of windows in the list (2-8), size, dark/light panel, Windows 11
+  accent colour, and show/hide window titles (the titles are your scene names).
+
+`transition-test` (built with `-DWF_BUILD_RENDER_TEST=ON`) renders the transition
+at chosen moments for every version into a PNG so it can be checked without OBS.
+
 ## 6. Known simplifications (and what "full" would take)
 
 | Area | What's implemented | What a fuller version needs |

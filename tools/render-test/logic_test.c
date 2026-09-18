@@ -151,6 +151,29 @@ int main(int argc, char **argv)
 	r = wf_download_presets("", msg, sizeof(msg));
 	CHECK(r < 0, "download refuses an empty URL");
 
+	printf("alt+tab transition\n");
+	{
+		obs_data_t *ts = obs_data_create();
+		obs_data_set_int(ts, "at_duration_ms", 2500);
+		obs_data_set_int(ts, "at_version", 4);
+		obs_source_t *tr = obs_source_create_private("win_alttab_transition", "at", ts);
+		obs_data_release(ts);
+		CHECK(tr != NULL, "the transition can be created");
+		if (tr) {
+			CHECK(obs_transition_fixed(tr), "its duration is locked to the plugin time setting");
+			obs_properties_t *tp = obs_source_properties(tr);
+			const char *tk[] = {"at_version", "at_duration_ms", "at_hold", "at_count", "at_scale", "at_dark", "at_accent", "at_titles"};
+			int miss = 0;
+			for (size_t i = 0; i < sizeof(tk) / sizeof(tk[0]); i++)
+				if (!obs_properties_get(tp, tk[i]))
+					miss++;
+			CHECK(miss == 0, "version, time, hold, count, size and colour controls exist");
+			obs_properties_destroy(tp);
+			obs_source_release(tr);
+		}
+		CHECK(obs_source_get_display_name("win_alttab_transition") != NULL, "it has a display name for the transitions list");
+	}
+
 	printf("update check\n");
 	strcpy(wf_prefs_get()->update_url, "");
 	CHECK(wf_check_update(msg, sizeof(msg), err, sizeof(err)) < 0, "unconfigured URL is reported");

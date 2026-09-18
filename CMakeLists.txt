@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.20)
 
-project(win-frame-filter VERSION 1.1.1 LANGUAGES C CXX)
+project(win-frame-filter VERSION 1.2.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -39,6 +39,7 @@ add_library(win-frame-filter MODULE
 	src/win-frame-text.c
 	src/win-frame-presets.c
 	src/wf-prefs.c
+	src/wf-alttab.c
 	src/wf-http.c
 	src/wf-actions.c
 	src/ui/menu-button.cpp
@@ -143,6 +144,14 @@ if(WF_BUILD_RENDER_TEST AND OBS_LIB)
 	endif()
 	target_link_libraries(render-test PRIVATE "${OBS_LIB}")
 	target_compile_definitions(render-test PRIVATE _CRT_SECURE_NO_WARNINGS)
+
+	add_executable(transition-test tools/render-test/transition_test.c)
+	target_include_directories(transition-test PRIVATE "${OBS_SOURCE_DIR}/libobs")
+	if(OBS_CONFIG_DIR)
+		target_include_directories(transition-test PRIVATE "${OBS_CONFIG_DIR}")
+	endif()
+	target_link_libraries(transition-test PRIVATE "${OBS_LIB}")
+	target_compile_definitions(transition-test PRIVATE _CRT_SECURE_NO_WARNINGS)
 
 	add_executable(logic-test tools/render-test/logic_test.c src/wf-actions.c src/wf-http.c src/wf-prefs.c
 		src/win-frame-presets.c src/win-frame-styles.c)

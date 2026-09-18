@@ -1,0 +1,326 @@
+// alttab.effect - the "Windows Alt+Tab" scene transition.
+//
+// One full-screen pass: the outgoing scene (A) is shown dimmed, an Alt+Tab
+// switcher is drawn over it (classic / Vista-7 glass / 8 / 10 / 11), the
+// highlight slides across the window list to the incoming scene (B), then the
+// overlay fades and B is shown.  Scenes A and B appear as live thumbnails;
+// any extra windows are procedural decoys.
+//
+// Colour maths is done in sRGB ("gamma") space and converted back at the end,
+// so the design colours look right whatever colour space OBS is using.
+
+uniform float4x4 ViewProj;
+uniform texture2d tex_a;
+uniform texture2d tex_b;
+uniform texture2d atlas;       // one title per row
+
+uniform float2 canvas_size;
+uniform float  ov_alpha;       // overlay opacity 0..1
+uniform float  bg_mix;         // 0 = scene A behind, 1 = scene B
+uniform float  dim;            // background dimming while the overlay is up
+uniform float  panel_scale;    // pop-in scale of the overlay
+uniform int    version;        // 0 classic, 1 Vista/7, 2 Win8, 3 Win10, 4 Win11
+uniform int    n;              // windows in the list
+uniform float  sel_pos;        // continuous selection index
+uniform int    dark;
+uniform float4 accent;
+uniform float4 tile0;          // x y (thumbnail / icon top-left)  w h
+uniform float  tile_step;
+uniform float  header_h;
+uniform float4 panel_rect;
+uniform float  atlas_w;
+uniform float  atlas_lh;
+uniform float  atlas_lines;
+uniform int    show_titles;
+uniform float  ui;             // px scale
+uniform float4 lw0;            // visible widths of title lines 0..3
+uniform float4 lw1;            // ... 4..7
+uniform float2 title_pos;      // free-standing title origin (y only is used)
+
+sampler_state linear_clamp {
+	Filter   = Linear;
+	AddressU = Clamp;
+	AddressV = Clamp;
+};
+
+struct VertData {
+	float4 pos : POSITION;
+	float2 uv  : TEXCOORD0;
+};
+
+VertData VSDefault(VertData v_in)
+{
+	VertData vert_out;
+	vert_out.pos = mul(float4(v_in.pos.xyz, 1.0), ViewProj);
+	vert_out.uv  = v_in.uv;
+	return vert_out;
+}
+
+// ------------------------------------------------------------- helpers
+float3 s2l(float3 c)
+{
+	return lerp(c / 12.92, pow((c + 0.055) / 1.055, float3(2.4, 2.4, 2.4)),
+		    step(float3(0.04045, 0.04045, 0.04045), c));
+}
+
+float3 l2s(float3 c)
+{
+	float3 x = max(c, float3(0.0, 0.0, 0.0));
+	return lerp(x * 12.92, 1.055 * pow(x, float3(0.4166667, 0.4166667, 0.4166667)) - 0.055,
+		    step(float3(0.0031308, 0.0031308, 0.0031308), x));
+}
+
+float cov(float d)
+{
+	return saturate(0.5 - d);
+}
+
+float sdBox(float2 p, float2 b, float r)
+{
+	float2 q = abs(p) - b + r;
+	return min(max(q.x, q.y), 0.0) + length(max(q, 0.0)) - r;
+}
+
+bool inrect(float2 p, float4 r)
+{
+	return p.x >= r.x && p.y >= r.y && p.x < r.x + r.z && p.y < r.y + r.w;
+}
+
+float4 over(float4 src, float4 dst)
+{
+	float a = src.a + dst.a * (1.0 - src.a);
+	float3 c = (src.rgb * src.a + dst.rgb * dst.a * (1.0 - src.a)) / max(a, 1e-5);
+	return float4(c, a);
+}
+
+float pick_lw(int row)
+{
+	float4 v = (row < 4) ? lw0 : lw1;
+	int r = (row < 4) ? row : row - 4;
+	return (r == 0) ? v.x : ((r == 1) ? v.y : ((r == 2) ? v.z : v.w));
+}
+
+float4 text_row(float2 p, float2 org, int row)
+{
+	float2 q = p - org;
+	if (q.x < 0.0 || q.y < 0.0 || q.x >= atlas_w || q.y >= atlas_lh)
+		return float4(0, 0, 0, 0);
+	float2 uv = float2(q.x / atlas_w, ((float)row * atlas_lh + q.y) / (atlas_lh * atlas_lines));
+	return atlas.Sample(linear_clamp, uv);
+}
+
+float3 tile_color(float idx)
+{
+	float h = frac(idx * 0.381966 + 0.11);
+	return saturate(0.55 + 0.45 * cos(6.2831853 * (h + float3(0.0, 0.33, 0.67))));
+}
+
+float3 decoy(float2 uv, float idx)
+{
+	float3 c = tile_color(idx);
+	float3 col = lerp(c * 0.95, c * 0.6, uv.y);
+	if (uv.y < 0.10)
+		col = c * 0.35 + 0.05;
+	float g = (uv.y - 0.16) / 0.8;
+	float rowi = floor(g * 7.0);
+	float len = 0.92 - frac(idx * 3.7 + rowi * 0.37) * 0.45;
+	if (uv.y > 0.16 && frac(g * 7.0) < 0.32 && uv.x > 0.08 && uv.x < len)
+		col = lerp(col, float3(1, 1, 1), 0.55);
+	return col;
+}
+
+float3 thumb(float idx, float2 uv)
+{
+	float2 u = saturate(uv);
+	if (idx < 0.5)
+		return l2s(tex_a.Sample(linear_clamp, u).rgb);
+	if (idx > (float)n - 1.5)
+		return l2s(tex_b.Sample(linear_clamp, u).rgb);
+	return decoy(u, idx);
+}
+
+float4 app_icon(float2 q, float size, float idx)
+{
+	float2 c = q - size * 0.5;
+	float d = sdBox(c, float2(size * 0.5 - 1.0, size * 0.5 - 1.0), size * 0.14);
+	float3 col = float3(0.96, 0.96, 0.98);
+	if (q.y < size * 0.30)
+		col = tile_color(idx);
+	float ring = cov(abs(d + 0.6) - 0.6);
+	col = lerp(col, float3(0.15, 0.17, 0.22), ring * 0.7);
+	return float4(col, cov(d));
+}
+
+// ------------------------------------------------------------- classic (95 - XP)
+float4 overlay_classic(float2 p)
+{
+	if (!inrect(p, panel_rect))
+		return float4(0, 0, 0, 0);
+	float2 lp = p - panel_rect.xy;
+	float dl = lp.x;
+	float dt = lp.y;
+	float dr = panel_rect.z - lp.x;
+	float db = panel_rect.w - lp.y;
+	float m = min(min(dl, dt), min(dr, db));
+	bool br = (dr <= dl && dr <= dt) || (db <= dl && db <= dt);
+	float3 col = float3(0.831, 0.816, 0.784);
+	if (m < 1.0)
+		col = br ? float3(0, 0, 0) : float3(0.87, 0.87, 0.87);
+	else if (m < 2.0)
+		col = br ? float3(0.5, 0.5, 0.5) : float3(1, 1, 1);
+
+	float cell = tile0.z;
+	float hx = tile0.x + sel_pos * tile_step;
+	float frame = max(ui * 2.0, 2.0);
+	float2 rel = p - float2(hx, tile0.y);
+	if (rel.x >= -frame && rel.y >= -frame && rel.x < cell + frame && rel.y < cell + frame) {
+		float mm = min(min(rel.x + frame, rel.y + frame), min(cell + frame - rel.x, cell + frame - rel.y));
+		if (mm < frame)
+			col = float3(0.0, 0.0, 0.5);
+	}
+	float ci = floor((p.x - tile0.x) / tile_step);
+	if (ci >= 0.0 && ci < (float)n) {
+		float2 q = p - float2(tile0.x + ci * tile_step, tile0.y);
+		float pad = cell * 0.18;
+		if (q.x >= pad && q.y >= pad && q.x < cell - pad && q.y < cell - pad) {
+			float4 ic = app_icon(q - pad, cell - 2.0 * pad, ci);
+			col = lerp(col, ic.rgb, ic.a);
+		}
+	}
+	if (show_titles != 0) {
+		int row = (int)floor(sel_pos + 0.5);
+		float lw = pick_lw(row);
+		float4 t = text_row(p, float2(floor(panel_rect.x + (panel_rect.z - lw) * 0.5) - 2.0, floor(title_pos.y)), row);
+		col = lerp(col, t.rgb, t.a);
+	}
+	return float4(col, 1.0);
+}
+
+// ------------------------------------------------------------- Vista/7, 8, 10, 11
+float4 overlay_tiles(float2 p)
+{
+	float r_panel = (version == 4) ? 16.0 * ui : ((version == 1) ? 10.0 * ui : 0.0);
+	float2 pc = panel_rect.xy + panel_rect.zw * 0.5;
+	float dpanel = sdBox(p - pc, panel_rect.zw * 0.5, r_panel);
+
+	float4 body;
+	if (version == 1)
+		body = float4(0.10, 0.14, 0.22, 0.66);
+	else if (version == 2)
+		body = float4(0.05, 0.05, 0.05, 0.90);
+	else if (version == 3)
+		body = (dark != 0) ? float4(0.11, 0.11, 0.11, 0.90) : float4(0.95, 0.95, 0.95, 0.92);
+	else
+		body = (dark != 0) ? float4(0.15, 0.15, 0.15, 0.90) : float4(0.96, 0.96, 0.96, 0.92);
+	body.a *= cov(dpanel);
+	float4 out_col = body;
+	if (version == 1) {
+		float sheen = (1.0 - saturate((p.y - panel_rect.y) / max(panel_rect.w * 0.5, 1.0))) * 0.10;
+		out_col.rgb += sheen;
+		out_col = over(float4(1, 1, 1, 0.45 * cov(abs(dpanel + 0.5) - 0.5)), out_col);
+	} else if (version == 4) {
+		float3 edge = (dark != 0) ? float3(1, 1, 1) : float3(0, 0, 0);
+		out_col = over(float4(edge, 0.10 * cov(abs(dpanel + 0.5) - 0.5)), out_col);
+	}
+
+	float tw = tile0.z;
+	float th = tile0.w;
+	float hpad = (version >= 3) ? 6.0 * ui : ((version == 1) ? 6.0 * ui : 3.0 * ui);
+	float hh = (version >= 3) ? header_h : 0.0;
+
+	// ---- moving highlight: fill behind the tiles
+	float hx = tile0.x + sel_pos * tile_step;
+	float4 hr = float4(hx - hpad, tile0.y - hh - hpad, tw + hpad * 2.0, hh + th + hpad * 2.0);
+	float2 hc = hr.xy + hr.zw * 0.5;
+	float hrad = (version == 4) ? 8.0 * ui : ((version == 1) ? 6.0 * ui : 0.0);
+	float dh = sdBox(p - hc, hr.zw * 0.5, hrad);
+	if (version == 1)
+		out_col = over(float4(0.63, 0.78, 1.0, 0.30 * cov(dh)), out_col);
+	else if (version == 3)
+		out_col = over(float4((dark != 0) ? float3(1, 1, 1) : float3(0, 0, 0), 0.13 * cov(dh)), out_col);
+	else if (version == 4)
+		out_col = over(float4(accent.rgb, 0.22 * cov(dh)), out_col);
+
+	// ---- tiles
+	float ci = floor((p.x - tile0.x) / tile_step);
+	if (ci >= 0.0 && ci < (float)n) {
+		float tx = tile0.x + ci * tile_step;
+		float2 tc = float2(tx + tw * 0.5, tile0.y + th * 0.5);
+		float trad = (version == 4) ? 6.0 * ui : ((version == 1) ? 2.0 * ui : 0.0);
+		float dt = sdBox(p - tc, float2(tw * 0.5, th * 0.5), trad);
+		float ta = cov(dt);
+		if (ta > 0.0) {
+			float2 uv = float2((p.x - tx) / tw, (p.y - tile0.y) / th);
+			float3 tcol = thumb(ci, uv);
+			out_col = over(float4(tcol, ta), out_col);
+			float bw = (version == 1) ? 3.0 * ui : 1.0;
+			float ba = (version == 1) ? 0.30 : ((version == 2) ? 0.35 : 0.15);
+			float ring = cov(abs(dt + bw * 0.5) - bw * 0.5);
+			out_col = over(float4(1, 1, 1, ba * ring), out_col);
+		}
+		// header row: icon + title (Win10 / Win11)
+		if (hh > 0.0 && p.y >= tile0.y - hh && p.y < tile0.y && (p.x - tx) < tw && (p.x - tx) >= 0.0) {
+			float isz = hh * 0.62;
+			float2 iq = p - float2(tx + 4.0 * ui, tile0.y - hh + (hh - isz) * 0.5);
+			if (iq.x >= 0.0 && iq.y >= 0.0 && iq.x < isz && iq.y < isz) {
+				float4 ic = app_icon(iq, isz, ci);
+				out_col = over(ic, out_col);
+			}
+			if (show_titles != 0) {
+				float2 org = float2(floor(tx + 4.0 * ui + isz + 6.0 * ui) - 2.0,
+						    floor(tile0.y - hh + (hh - atlas_lh) * 0.5));
+				float4 t = text_row(p, org, (int)ci);
+				if ((p.x - tx) < tw - 4.0 * ui)
+					out_col = over(t, out_col);
+			}
+		}
+	}
+
+	// ---- moving highlight: outline over the tiles
+	float ow = 2.0 * ui;
+	float oring = cov(abs(dh + ow * 0.5) - ow * 0.5);
+	if (version == 1)
+		out_col = over(float4(0.78, 0.90, 1.0, 0.95 * oring), out_col);
+	else if (version == 2)
+		out_col = over(float4(1, 1, 1, 0.95 * cov(abs(sdBox(p - (float2(hx, tile0.y) + float2(tw, th) * 0.5), float2(tw, th) * 0.5 + 3.0 * ui, 0.0) + ow * 0.5) - ow * 0.5)), out_col);
+	else if (version == 3)
+		out_col = over(float4((dark != 0) ? float3(1, 1, 1) : float3(0, 0, 0), 0.90 * oring), out_col);
+	else
+		out_col = over(float4(accent.rgb, oring), out_col);
+
+	// ---- free-standing title above the panel (Vista/7, Win8)
+	if (version <= 2 && show_titles != 0) {
+		int row = (int)floor(sel_pos + 0.5);
+		float lw = pick_lw(row);
+		float2 org = float2(floor(pc.x - lw * 0.5) - 2.0, floor(title_pos.y));
+		float4 sh = text_row(p, org + float2(1.0, 1.0), row);
+		out_col = over(float4(0, 0, 0, sh.a * 0.6), out_col);
+		out_col = over(text_row(p, org, row), out_col);
+	}
+	return out_col;
+}
+
+float4 PSAlt(VertData v_in) : TARGET
+{
+	float2 p = v_in.uv * canvas_size;
+	float3 a = l2s(tex_a.Sample(linear_clamp, v_in.uv).rgb);
+	float3 b = l2s(tex_b.Sample(linear_clamp, v_in.uv).rgb);
+	float3 col = lerp(a, b, bg_mix) * (1.0 - dim * ov_alpha);
+
+	if (ov_alpha > 0.001) {
+		float2 c = canvas_size * 0.5;
+		float2 pp = c + (p - c) / max(panel_scale, 0.01);
+		float4 o = (version == 0) ? overlay_classic(pp) : overlay_tiles(pp);
+		col = lerp(col, o.rgb, o.a * ov_alpha);
+	}
+	return float4(s2l(col), 1.0);
+}
+
+technique Draw
+{
+	pass
+	{
+		vertex_shader = VSDefault(v_in);
+		pixel_shader  = PSAlt(v_in);
+	}
+}
