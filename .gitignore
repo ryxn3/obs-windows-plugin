@@ -1,0 +1,14 @@
+build/
+build_x64/
+out/
+*.obj
+*.pdb
+*.ilk
+*.exp
+.vs/
+CMakeCache.txt
+CMakeFiles/
+CMakeUserPresets.json
+dist/
+__pycache__/
+*.pyc

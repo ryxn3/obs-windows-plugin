@@ -1,0 +1,808 @@
+// win_frame.effect  (v1.1)
+// Single-pass compositor that draws a whole miniature OS window: shadow,
+// glow, frame, classic 3D bevels, title bar (flat / gradient / Luna), icon,
+// text, four button styles, status bar, resize grip, border and the
+// cropped + masked camera image.  Everything is analytic (signed-distance
+// shapes, pixel-space measurements) so it costs a few ALU ops per pixel and
+// one camera texture sample -- no extra render targets.
+//
+// Coordinates: canvas pixels, origin top-left, +y down.  Pixel centres are
+// at (i + 0.5), so 1px lines centred on .5 land exactly on one pixel row.
+
+uniform float4x4 ViewProj;
+
+uniform texture2d image;
+uniform texture2d title_text;
+uniform texture2d status_text;
+uniform texture2d icon_tex;
+uniform texture2d mask_tex;
+uniform texture2d bg_tex;
+
+uniform float2 canvas_size;
+uniform float4 window_rect;       // x y w h
+uniform float4 corner_radii;      // tl tr br bl
+uniform float  frame_thickness;
+uniform int    frame_style;       // 0 flat, 1 classic bevel
+uniform float4 frame_color;
+uniform float4 body_rect;
+
+uniform float4 cam_rect;
+uniform float4 cam_crop;
+uniform float  cam_zoom;
+uniform float2 cam_pos;
+uniform int    cam_bevel;
+uniform int    mask_type;         // 0 rect 1 rounded 2 circle 3 ellipse 4 custom
+uniform float  mask_feather;
+uniform float  mask_radius;
+uniform int    use_custom_mask;
+
+uniform float4 bg_color_top;
+uniform float4 bg_color_bottom;
+uniform float  bg_opacity;
+uniform int    use_custom_bg;
+
+uniform int    border_enabled;
+uniform float  border_thickness;
+uniform float  border_opacity;
+uniform float4 border_color;
+uniform int    border_double;
+uniform float4 border_inner_color;
+uniform int    border_dashed;
+
+uniform int    titlebar_enabled;
+uniform float4 titlebar_rect;
+uniform int    titlebar_style;    // 0 gradient/flat, 1 Luna
+uniform float4 titlebar_color_a;
+uniform float4 titlebar_color_b;
+uniform int    titlebar_gradient;
+uniform int    titlebar_grad_horiz;
+uniform float  glass_reflection;
+
+uniform float4 title_text_rect;   // clip rect (x y w h)
+uniform float2 title_text_size;   // texture size in px
+uniform int    title_shadow;      // 0 none 1 drop 2 glow
+uniform float4 icon_rect;
+uniform int    icon_mode;         // 0 none 1 camera 2 back arrow 3 sysmenu 4 hamburger 5 amiga close 6 GEM close
+uniform int    icon_custom;
+
+uniform int    statusbar_enabled;
+uniform float4 statusbar_rect;
+uniform float4 statusbar_color;
+uniform float4 status_text_rect;
+uniform float2 status_text_size;
+
+uniform int    resizegrip_enabled;
+uniform float4 resizegrip_rect;
+
+uniform int    btn_style;         // 0 classic 1 Luna 2 Aero 3 flat
+uniform int    btn_count;
+uniform float4 btn_rect_0; uniform float4 btn_color_0; uniform int btn_type_0;
+uniform float4 btn_rect_1; uniform float4 btn_color_1; uniform int btn_type_1;
+uniform float4 btn_rect_2; uniform float4 btn_color_2; uniform int btn_type_2;
+uniform float4 btn_symbol_color;
+uniform float4 btn_symbol_close_color;
+uniform float  btn_glyph;         // glyph half extent, px
+uniform float  btn_lw;            // glyph half line width, px
+uniform int    btn_hover;         // -1 none, else button type drawn in hover state
+
+uniform int    snap_enabled;      // Win11 Snap Layouts flyout
+uniform float4 snap_rect;
+uniform float4 snap_accent;
+
+uniform int    tiles_enabled;     // Windows Phone tile row in the status bar
+uniform float4 tile_color;
+
+uniform float  cam_pixelate;      // block size px, 0 = off
+uniform float  cam_scanlines;     // 0..1
+uniform float  cam_crt;           // 0..1 curvature + vignette + chroma shift
+
+uniform int    shadow_enabled;
+uniform float4 shadow_color;
+uniform float  shadow_opacity;
+uniform float  shadow_blur;
+uniform float  shadow_spread;
+uniform float2 shadow_offset;
+
+uniform int    glow_enabled;
+uniform float4 glow_color;
+uniform float  glow_opacity;
+uniform float  glow_radius;
+uniform float  glow_intensity;
+
+uniform float  anim_alpha;
+uniform float2 anim_scale_origin;
+uniform float  anim_scale;
+
+sampler_state linear_clamp {
+	Filter    = Linear;
+	AddressU  = Clamp;
+	AddressV  = Clamp;
+};
+
+struct VertData {
+	float4 pos : POSITION;
+	float2 uv  : TEXCOORD0;
+};
+
+VertData VSDefault(VertData v_in)
+{
+	VertData vert_out;
+	vert_out.pos = mul(float4(v_in.pos.xyz, 1.0), ViewProj);
+	vert_out.uv  = v_in.uv;
+	return vert_out;
+}
+
+// ------------------------------------------------------------------ helpers
+float4 over(float4 src, float4 dst)
+{
+	float out_a = src.a + dst.a * (1.0 - src.a);
+	float3 out_rgb = (src.rgb * src.a + dst.rgb * dst.a * (1.0 - src.a)) / max(out_a, 1e-5);
+	return float4(out_rgb, out_a);
+}
+
+float4 tex_at(texture2d tex, float2 uv)
+{
+	return tex.Sample(linear_clamp, uv);
+}
+
+// rounded box, per-corner radii (tl tr br bl), y-down
+float sdBox4(float2 p, float2 b, float4 r)
+{
+	float rad = (p.x < 0.0) ? ((p.y < 0.0) ? r.x : r.w) : ((p.y < 0.0) ? r.y : r.z);
+	float2 q = abs(p) - b + rad;
+	return min(max(q.x, q.y), 0.0) + length(max(q, 0.0)) - rad;
+}
+
+float sdBox(float2 p, float2 b, float r)
+{
+	float2 q = abs(p) - b + r;
+	return min(max(q.x, q.y), 0.0) + length(max(q, 0.0)) - r;
+}
+
+float sdSeg(float2 p, float2 a, float2 b)
+{
+	float2 pa = p - a;
+	float2 ba = b - a;
+	float h = saturate(dot(pa, ba) / dot(ba, ba));
+	return length(pa - ba * h);
+}
+
+float cov(float d)            // 1px anti-aliased coverage from signed distance
+{
+	return saturate(0.5 - d);
+}
+
+float4 hexc(float r, float g, float b)   // opaque colour from 0..255 ints
+{
+	return float4(r / 255.0, g / 255.0, b / 255.0, 1.0);
+}
+
+bool inrect(float2 p, float4 r)
+{
+	return p.x >= r.x && p.y >= r.y && p.x < r.x + r.z && p.y < r.y + r.w;
+}
+
+// Luna title bar: authentic multi-stop vertical gradient, top -> bottom
+float4 luna_title(float t)
+{
+	float4 c = hexc(0, 88, 238);
+	c = lerp(c, hexc(53, 147, 255), smoothstep(0.00, 0.03, t));
+	c = lerp(c, hexc(40, 142, 255), smoothstep(0.03, 0.06, t));
+	c = lerp(c, hexc(18, 125, 255), smoothstep(0.06, 0.10, t));
+	c = lerp(c, hexc(3, 111, 252), smoothstep(0.10, 0.14, t));
+	c = lerp(c, hexc(2, 98, 238), smoothstep(0.14, 0.20, t));
+	c = lerp(c, hexc(0, 87, 229), smoothstep(0.20, 0.30, t));
+	c = lerp(c, hexc(0, 84, 227), smoothstep(0.30, 0.55, t));
+	c = lerp(c, hexc(0, 85, 235), smoothstep(0.55, 0.80, t));
+	c = lerp(c, hexc(0, 91, 245), smoothstep(0.80, 0.88, t));
+	c = lerp(c, hexc(2, 106, 254), smoothstep(0.88, 0.92, t));
+	c = lerp(c, hexc(0, 98, 239), smoothstep(0.92, 0.96, t));
+	c = lerp(c, hexc(0, 82, 214), smoothstep(0.96, 1.00, t));
+	return c;
+}
+
+// tiny camera glyph for the "fake application icon", uv in px inside icon_rect
+float4 camera_icon(float2 q, float2 size)
+{
+	float2 u = q / size;                      // 0..1
+	float4 col = float4(0, 0, 0, 0);
+
+	float d_body = sdBox((u - float2(0.5, 0.60)) * size, float2(0.46, 0.30) * size, 0.10 * size.x);
+	float d_bump = sdBox((u - float2(0.5, 0.26)) * size, float2(0.20, 0.10) * size, 0.05 * size.x);
+	float body = max(cov(d_body), cov(d_bump));
+	float4 bcol = lerp(hexc(120, 140, 170), hexc(52, 68, 96), saturate((u.y - 0.25) / 0.6));
+	bcol.a = body;
+	col = over(bcol, col);
+
+	float dl = length((u - float2(0.5, 0.60)) * size);
+	float r0 = 0.24 * size.x;
+	float4 ring = float4(0.86, 0.91, 0.97, cov(dl - r0));
+	col = over(ring, col);
+	float4 lens = float4(0.08, 0.14, 0.28, cov(dl - r0 * 0.68));
+	col = over(lens, col);
+	float dh = length((u - float2(0.44, 0.54)) * size);
+	col = over(float4(1, 1, 1, 0.75 * cov(dh - r0 * 0.16)), col);
+
+	float dflash = sdBox((u - float2(0.80, 0.36)) * size, float2(0.06, 0.04) * size, 0.0);
+	col = over(float4(1.0, 0.85, 0.3, cov(dflash)), col);
+	return col;
+}
+
+// classic bevel ring colours: returns alpha 0 when pixel is not on a ring
+float4 bevel_ring(float2 lp, float2 sz, float4 tl1, float4 br1, float4 tl2, float4 br2, float rings)
+{
+	float dl = lp.x;
+	float dt = lp.y;
+	float dr = sz.x - lp.x;
+	float db = sz.y - lp.y;
+	float m = min(min(dl, dt), min(dr, db));
+	bool br = (dr <= dl && dr <= dt) || (db <= dl && db <= dt);
+	if (m < 1.0)
+		return br ? br1 : tl1;
+	if (rings > 1.5 && m < 2.0)
+		return br ? br2 : tl2;
+	return float4(0, 0, 0, 0);
+}
+
+float tri_cov(float2 gp, float gh, int up)
+{
+	float2 q = gp;
+	if (up == 0)
+		q.y = -q.y;
+	float t = (q.y + gh) / (1.8 * gh);
+	float w = t * gh;
+	float d = max(abs(q.x) - w, max(-(q.y + gh), q.y - 0.8 * gh));
+	return cov(d);
+}
+
+float box_outline(float2 gp, float2 c, float h, float lw)
+{
+	float2 q = abs(gp - c) - h;
+	float outer = max(q.x, q.y);
+	return cov(abs(outer + lw) - lw);
+}
+
+float4 glyph_draw(int btype, float2 gp, float gh, float lw, int style)
+{
+	float d = 100.0;
+	if (style == 5) {                                   // Win3.1: min = down arrow, max = up arrow
+		if (btype == 0)
+			return float4(1, 1, 1, tri_cov(gp, gh, 0));
+		return float4(1, 1, 1, tri_cov(gp, gh, 1));
+	}
+	if (style == 7) {                                   // Amiga gadgets
+		if (btype == 0) {                               // depth: two overlapping squares
+			float a0 = max(box_outline(gp, float2(-gh * 0.35, -gh * 0.35), gh * 0.62, 0.5),
+				       box_outline(gp, float2(gh * 0.35, gh * 0.35), gh * 0.62, 0.5));
+			return float4(1, 1, 1, a0);
+		}
+		float a1 = max(box_outline(gp, float2(0, 0), gh, 0.5), box_outline(gp, float2(-gh * 0.4, gh * 0.4), gh * 0.42, 0.5));
+		return float4(1, 1, 1, a1);
+	}
+	if (btype == 2) {                                   // close: X
+		d = min(sdSeg(gp, float2(-gh, -gh), float2(gh, gh)),
+			sdSeg(gp, float2(-gh, gh), float2(gh, -gh))) - lw;
+	} else if (btype == 1) {                            // maximize: box
+		float2 q = abs(gp) - gh;
+		float outer = max(q.x, q.y);
+		d = abs(outer + lw) - lw;
+		if (style == 0) {
+			float2 tq = float2(abs(gp.x) - gh, abs(gp.y + gh - 1.0) - 1.0);
+			d = min(d, max(tq.x, tq.y));
+		}
+	} else {                                            // minimize: bar
+		float gy = (style == 0) ? gh * 0.75 : ((style == 3 || style == 6) ? 0.0 : gh * 0.55);
+		float2 q = float2(abs(gp.x) - gh * (style == 0 ? 0.85 : 1.0), abs(gp.y - gy) - (style == 0 ? 1.0 : lw));
+		d = max(q.x, q.y);
+	}
+	return float4(1, 1, 1, cov(d));
+}
+
+float4 draw_button(float2 p, float4 brect, float4 bcol, int btype, int style, int hovered)
+{
+	float2 bc = brect.xy + brect.zw * 0.5;
+	float2 bh = brect.zw * 0.5;
+	float2 bp = p - bc;
+	float4 out_col = float4(0, 0, 0, 0);
+	bool is_close = (btype == 2);
+	float4 sym = is_close ? btn_symbol_close_color : btn_symbol_color;
+	float2 lp = p - brect.xy;
+
+	if (style == 0 || style == 5) {                     // classic 3D button
+		if (abs(bp.x) <= bh.x && abs(bp.y) <= bh.y) {
+			float4 r = bevel_ring(lp, brect.zw,
+					      hexc(255, 255, 255), hexc(0, 0, 0),
+					      hexc(223, 223, 223), hexc(128, 128, 128), 2.0);
+			out_col = (r.a > 0.0) ? r : bcol;
+		}
+	} else if (style == 1) {                            // Luna rounded glossy
+		float d = sdBox(bp, bh, 3.0);
+		float body = cov(d);
+		if (body > 0.0) {
+			float t = saturate(lp.y / brect.w);
+			float3 top = lerp(bcol.rgb, float3(1, 1, 1), 0.38);
+			float3 bot = lerp(bcol.rgb, float3(0, 0, 0), 0.28);
+			float4 fill = float4((t < 0.5) ? lerp(top, bcol.rgb, t * 2.0) : lerp(bcol.rgb, bot, (t - 0.5) * 2.0), 1.0);
+			float ring = cov(abs(d + 0.9) - 0.9);
+			fill.rgb = lerp(fill.rgb, float3(1, 1, 1), ring * 0.95);
+			float glow = saturate(1.0 - length((lp - float2(brect.z * 0.30, brect.w * 0.22)) / brect.zw) * 3.0);
+			fill.rgb += glow * 0.18;
+			fill.a = body;
+			out_col = fill;
+		}
+	} else if (style == 2) {                            // Aero glass pill
+		float d = sdBox4(bp, bh, float4(0.0, 0.0, 4.5, 4.5));
+		float body = cov(d);
+		if (body > 0.0) {
+			float t = saturate(lp.y / brect.w);
+			float3 top = lerp(bcol.rgb, float3(1, 1, 1), 0.42);
+			float3 bot = lerp(bcol.rgb, float3(0, 0, 0), 0.22);
+			float4 fill = float4(lerp(top, bot, t), bcol.a);
+			float split = smoothstep(0.46, 0.54, t);
+			fill.rgb = lerp(fill.rgb * 1.12, fill.rgb * 0.84, split);
+			fill.a *= body;
+			float4 edge = float4(0.05, 0.08, 0.14, 0.75 * cov(abs(d + 0.5) - 0.5));
+			float4 inner = float4(1, 1, 1, 0.55 * cov(abs(d + 1.5) - 0.5));
+			out_col = over(inner, over(edge, fill));
+		}
+	} else if (style == 4) {                            // macOS traffic light
+		float r = bh.x;
+		float d = length(bp) - r;
+		float body = cov(d);
+		if (body > 0.0) {
+			float3 c = (btype == 2) ? float3(1.0, 0.373, 0.341) : ((btype == 0) ? float3(0.996, 0.737, 0.18) : float3(0.157, 0.784, 0.251));
+			float t = saturate(lp.y / brect.w);
+			float3 fillc = lerp(c * 1.06, c * 0.94, t);
+			float ring = cov(abs(d + 0.5) - 0.5);
+			fillc = lerp(fillc, c * 0.68, ring * 0.9);
+			out_col = float4(fillc, body);
+		}
+		return out_col;
+	} else if (style == 6) {                            // GNOME / Adwaita circle
+		float r = min(bh.x, bh.y);
+		float d = length(bp) - r;
+		float body = cov(d);
+		if (body > 0.0) {
+			float ring = cov(abs(d + 0.5) - 0.5);
+			float3 fillc = lerp(bcol.rgb, bcol.rgb * 0.82, ring * 0.7);
+			out_col = float4(fillc, bcol.a * body);
+			if (hovered != 0)
+				out_col.rgb = lerp(out_col.rgb, float3(0, 0, 0), 0.08);
+		}
+	} else if (style == 7) {                            // Amiga square gadget
+		if (abs(bp.x) <= bh.x && abs(bp.y) <= bh.y) {
+			float m = min(min(lp.x, lp.y), min(brect.z - lp.x, brect.w - lp.y));
+			out_col = (m < 1.0) ? hexc(0, 0, 0) : bcol;
+		}
+	} else {                                            // flat (Win 8 - 11, KDE)
+		if (abs(bp.x) <= bh.x && abs(bp.y) <= bh.y) {
+			out_col = bcol;
+			if (hovered != 0) {
+				float4 hc = is_close ? float4(0.769, 0.169, 0.110, 1.0)
+						     : ((sym.r > 0.5) ? float4(1, 1, 1, 0.10) : float4(0, 0, 0, 0.09));
+				out_col = over(hc, out_col);
+				if (is_close)
+					sym = float4(1, 1, 1, 1);
+			}
+		}
+	}
+
+	float2 gc = float2(floor(bc.x) + 0.5, floor(bc.y) + 0.5);
+	float2 gp = p - gc;
+	float4 g = glyph_draw(btype, gp, btn_glyph, btn_lw, style);
+	if (style == 2) {
+		float4 shadow_g = glyph_draw(btype, gp, btn_glyph, btn_lw + 1.1, style);
+		out_col = over(float4(0.0, 0.0, 0.0, 0.45 * shadow_g.a), out_col);
+	}
+	out_col = over(float4(sym.rgb, sym.a * g.a), out_col);
+	return out_col;
+}
+
+// ---- title-bar icon variants
+float4 draw_icon(int mode, float2 q, float2 size)
+{
+	float4 col = float4(0, 0, 0, 0);
+	float2 c = q - size * 0.5;
+	if (mode == 1) {
+		return camera_icon(q, size);
+	} else if (mode == 2) {                             // Metro back arrow in a circle
+		float r = min(size.x, size.y) * 0.5 - 1.5;
+		float ring = cov(abs(length(c) - r) - 0.9);
+		float a = size.x * 0.22;
+		float d = min(sdSeg(c, float2(-a, 0), float2(a, 0)),
+			      min(sdSeg(c, float2(-a, 0), float2(-a * 0.1, -a * 0.9)), sdSeg(c, float2(-a, 0), float2(-a * 0.1, a * 0.9)))) - 0.9;
+		col = float4(btn_symbol_color.rgb, btn_symbol_color.a * max(ring, cov(d)));
+	} else if (mode == 3) {                             // Win 3.1 control-menu box
+		float m = min(min(q.x, q.y), min(size.x - q.x, size.y - q.y));
+		float4 face = hexc(192, 192, 192);
+		if (m < 1.0)
+			face = hexc(0, 0, 0);
+		float2 d = abs(c) - float2(size.x * 0.28, 1.5);
+		float2 d2 = abs(c) - float2(size.x * 0.28 + 1.0, 2.5);
+		if (max(d2.x, d2.y) < 0.0)
+			face = hexc(0, 0, 0);
+		if (max(d.x, d.y) < 0.0)
+			face = hexc(255, 255, 255);
+		col = face;
+	} else if (mode == 4) {                             // hamburger
+		float w = size.x * 0.32;
+		float d0 = sdSeg(c, float2(-w, -size.y * 0.22), float2(w, -size.y * 0.22)) - 0.75;
+		float d1 = sdSeg(c, float2(-w, 0), float2(w, 0)) - 0.75;
+		float d2 = sdSeg(c, float2(-w, size.y * 0.22), float2(w, size.y * 0.22)) - 0.75;
+		col = float4(btn_symbol_color.rgb, btn_symbol_color.a * cov(min(d0, min(d1, d2))));
+	} else if (mode == 5 || mode == 6) {                // Amiga / GEM close gadget
+		float m = min(min(q.x, q.y), min(size.x - q.x, size.y - q.y));
+		col = (m < 1.0) ? hexc(0, 0, 0) : hexc(255, 255, 255);
+		float2 d = abs(c) - size.x * 0.22;
+		float inner = max(d.x, d.y);
+		if (mode == 5 && abs(inner) < 0.5)
+			col = hexc(0, 0, 0);
+		if (mode == 6 && inner < 0.0)
+			col = hexc(0, 0, 0);
+	}
+	return col;
+}
+
+// ---- Windows 11 Snap Layouts popup
+float pane_cov(float2 q, float2 size, float x, float y, float w, float h)
+{
+	float2 c = float2((x + w * 0.5) * size.x, (y + h * 0.5) * size.y);
+	float2 half_size = float2(w * size.x, h * size.y) * 0.5 - 1.5;
+	return cov(sdBox(q - c, half_size, 2.0));
+}
+
+float2 layout_icon(float2 q, float2 size, int k)
+{
+	float a = 0.0;
+	float hl = 0.0;
+	if (k == 0) {
+		hl = pane_cov(q, size, 0.0, 0.0, 0.5, 1.0);
+		a = max(hl, pane_cov(q, size, 0.5, 0.0, 0.5, 1.0));
+	} else if (k == 1) {
+		a = max(pane_cov(q, size, 0.0, 0.0, 0.66, 1.0), pane_cov(q, size, 0.66, 0.0, 0.34, 1.0));
+	} else if (k == 2) {
+		a = max(pane_cov(q, size, 0.0, 0.0, 0.34, 1.0), pane_cov(q, size, 0.34, 0.0, 0.66, 1.0));
+	} else if (k == 3) {
+		a = max(pane_cov(q, size, 0.0, 0.0, 0.333, 1.0), max(pane_cov(q, size, 0.333, 0.0, 0.334, 1.0), pane_cov(q, size, 0.667, 0.0, 0.333, 1.0)));
+	} else if (k == 4) {
+		a = max(pane_cov(q, size, 0.0, 0.0, 0.5, 1.0), max(pane_cov(q, size, 0.5, 0.0, 0.5, 0.5), pane_cov(q, size, 0.5, 0.5, 0.5, 0.5)));
+	} else {
+		a = max(max(pane_cov(q, size, 0.0, 0.0, 0.5, 0.5), pane_cov(q, size, 0.5, 0.0, 0.5, 0.5)),
+			max(pane_cov(q, size, 0.0, 0.5, 0.5, 0.5), pane_cov(q, size, 0.5, 0.5, 0.5, 0.5)));
+	}
+	return float2(a, hl);
+}
+
+float4 draw_snap(float2 p, float4 r, float dark)
+{
+	float2 c = r.xy + r.zw * 0.5;
+	float2 h = r.zw * 0.5;
+	float d = sdBox(p - c, h, 8.0);
+	float4 out_col = float4(0, 0, 0, 0);
+	float sh = sdBox(p - c - float2(0, 4), h, 8.0);
+	out_col = over(float4(0, 0, 0, 0.28 * (1.0 - smoothstep(0.0, 10.0, sh))), out_col);
+	float4 bg = (dark > 0.5) ? hexc(44, 44, 44) : hexc(249, 249, 249);
+	out_col = over(float4(bg.rgb, cov(d)), out_col);
+	out_col = over(float4(0, 0, 0, 0.16 * cov(abs(d + 0.5) - 0.5)), out_col);
+	float2 lp = p - r.xy;
+	float2 cell = float2((r.z - 16.0) / 3.0, (r.w - 16.0) / 2.0);
+	float2 g = (lp - 8.0) / cell;
+	if (g.x >= 0.0 && g.y >= 0.0 && g.x < 3.0 && g.y < 2.0) {
+		int k = (int)floor(g.y) * 3 + (int)floor(g.x);
+		float2 q = (g - floor(g)) * cell;
+		float2 isz = cell - 8.0;
+		float2 li = layout_icon(q - 4.0, isz, k);
+		float4 pane = (dark > 0.5) ? hexc(90, 90, 90) : hexc(206, 211, 219);
+		out_col = over(float4(pane.rgb, li.x), out_col);
+		out_col = over(float4(snap_accent.rgb, li.y * 0.9), out_col);
+	}
+	return out_col;
+}
+
+float4 sample_text(texture2d tex, float2 pos, float4 rect, float2 tsize)
+{
+	float2 xl = pos - rect.xy;
+	if (xl.x < 0.0 || xl.y < 0.0 || xl.x > rect.z || xl.y > rect.w)
+		return float4(0, 0, 0, 0);
+	return tex_at(tex, xl / tsize);
+}
+
+// ------------------------------------------------------------------ main
+float4 PSWinFrame(VertData v_in) : TARGET
+{
+	float2 p = v_in.uv * canvas_size;
+	float2 win_center = window_rect.xy + window_rect.zw * 0.5;
+	float2 win_half   = window_rect.zw * 0.5;
+
+	float2 p_anim = anim_scale_origin + (p - anim_scale_origin) / max(anim_scale, 0.0001);
+
+	float d_window = sdBox4(p_anim - win_center, win_half, corner_radii);
+	float win_cov = cov(d_window);
+	float rmax = max(max(corner_radii.x, corner_radii.y), max(corner_radii.z, corner_radii.w));
+
+	float4 result = float4(0, 0, 0, 0);
+
+	// ---- shadow
+	if (shadow_enabled != 0) {
+		float d_sh = sdBox(p_anim - win_center - shadow_offset, win_half + shadow_spread.xx, rmax + shadow_spread);
+		float b = max(shadow_blur, 0.001);
+		float sh = 1.0 - smoothstep(-b * 0.5, b, d_sh);
+		result = over(float4(shadow_color.rgb, sh * shadow_opacity), result);
+	}
+
+	// ---- glow
+	if (glow_enabled != 0) {
+		float gl = 1.0 - smoothstep(0.0, max(glow_radius, 0.001), d_window);
+		gl *= glow_opacity * glow_intensity * (1.0 - win_cov);
+		result = over(float4(glow_color.rgb, gl), result);
+	}
+
+	if (win_cov > 0.0001) {
+		float2 local = p_anim - window_rect.xy;
+
+		// ---- fill: frame colour in the ring, body colour in the client area
+		float4 win_col = frame_color;
+		if (inrect(p_anim, body_rect)) {
+			if (use_custom_bg != 0) {
+				float2 buv = local / max(window_rect.zw, float2(1, 1));
+				win_col = tex_at(bg_tex, buv);
+			} else {
+				float ty = saturate((p_anim.y - body_rect.y) / max(body_rect.w, 1.0));
+				win_col = lerp(bg_color_top, bg_color_bottom, ty);
+			}
+		}
+		win_col.a *= bg_opacity;
+
+		// ---- classic raised window frame
+		if (frame_style == 1) {
+			float4 r = bevel_ring(local, window_rect.zw,
+					      hexc(223, 223, 223), hexc(0, 0, 0),
+					      hexc(255, 255, 255), hexc(128, 128, 128), 2.0);
+			if (r.a > 0.0)
+				win_col = r;
+		}
+
+		// ---- sunken client edge around the camera
+		if (cam_bevel != 0) {
+			float2 c = p_anim - cam_rect.xy;
+			float dl = -c.x;
+			float dt = -c.y;
+			float dr = c.x - cam_rect.z;
+			float db = c.y - cam_rect.w;
+			float dout = max(max(dl, dt), max(dr, db));
+			if (dout > 0.0 && dout <= 2.0) {
+				bool brs = (dr > 0.0 || db > 0.0);
+				float4 sc;
+				if (dout > 1.0)
+					sc = brs ? hexc(255, 255, 255) : hexc(128, 128, 128);
+				else
+					sc = brs ? hexc(223, 223, 223) : hexc(0, 0, 0);
+				win_col = sc;
+			}
+		}
+
+		// ---- camera
+		float2 cl = p_anim - cam_rect.xy;
+		if (cl.x >= -1.0 && cl.y >= -1.0 && cl.x <= cam_rect.z + 1.0 && cl.y <= cam_rect.w + 1.0) {
+			float2 cuv = cl / max(cam_rect.zw, float2(1, 1));
+			float2 chalf = cam_rect.zw * 0.5;
+			float2 cp = cl - chalf;
+			float mcov = 1.0;
+			float fw = max(mask_feather, 1.0);
+			if (use_custom_mask != 0) {
+				mcov = tex_at(mask_tex, cuv).a;
+			} else if (mask_type == 2) {
+				mcov = saturate(0.5 - (length(cp) - min(chalf.x, chalf.y)) / fw);
+			} else if (mask_type == 3) {
+				float e = (length(cp / chalf) - 1.0) * min(chalf.x, chalf.y);
+				mcov = saturate(0.5 - e / fw);
+			} else if (mask_type == 1) {
+				mcov = saturate(0.5 - sdBox(cp, chalf, min(mask_radius, min(chalf.x, chalf.y))) / fw);
+			} else {
+				mcov = saturate(0.5 - sdBox(cp, chalf, 0.0) / fw);
+				if (mask_feather <= 0.0)
+					mcov = (cl.x >= 0.0 && cl.y >= 0.0 && cl.x < cam_rect.z && cl.y < cam_rect.w) ? 1.0 : 0.0;
+			}
+
+			float2 cuv_fx = cuv;
+			float vign = 1.0;
+			float crt_mask = 1.0;
+			if (cam_crt > 0.0) {
+				float2 qc = (cuv - 0.5) * 2.0;
+				float r2 = dot(qc, qc);
+				qc *= 1.0 + cam_crt * 0.10 * r2;
+				cuv_fx = qc * 0.5 + 0.5;
+				vign = 1.0 - cam_crt * 0.32 * r2;
+				crt_mask = (abs(qc.x) <= 1.0 && abs(qc.y) <= 1.0) ? 1.0 : 0.0;
+			}
+			if (cam_pixelate > 1.0) {
+				float2 blk = floor(cl / cam_pixelate) * cam_pixelate + cam_pixelate * 0.5;
+				cuv_fx = blk / max(cam_rect.zw, float2(1, 1));
+			}
+
+			float2 crop_min = float2(cam_crop.x, cam_crop.z);
+			float2 crop_max = float2(1.0 - cam_crop.y, 1.0 - cam_crop.w);
+			float2 crop_size = max(crop_max - crop_min, float2(0.001, 0.001));
+			float2 src_uv = crop_min + cuv_fx * crop_size;
+			float2 mid = crop_min + crop_size * 0.5;
+			src_uv = (src_uv - mid) / max(cam_zoom, 0.001) + mid;
+			src_uv -= cam_pos;
+
+			float4 cam_col = float4(0, 0, 0, 0);
+			if (src_uv.x >= 0.0 && src_uv.x <= 1.0 && src_uv.y >= 0.0 && src_uv.y <= 1.0) {
+				cam_col = tex_at(image, src_uv);
+				if (cam_crt > 0.0) {
+					float2 off = float2(cam_crt * 0.0035, 0.0);
+					cam_col.r = tex_at(image, saturate(src_uv + off)).r;
+					cam_col.b = tex_at(image, saturate(src_uv - off)).b;
+				}
+			}
+			if (cam_scanlines > 0.0) {
+				float sl = 0.5 + 0.5 * cos(6.2831853 * cl.y / 3.0);
+				cam_col.rgb *= 1.0 - cam_scanlines * 0.55 * sl;
+			}
+			if (cam_crt > 0.0) {
+				cam_col.rgb *= vign;
+				cam_col.rgb = lerp(cam_col.rgb, float3(0, 0, 0), 1.0 - crt_mask);
+				cam_col.a = max(cam_col.a, 1.0 - crt_mask);
+			}
+			cam_col.a *= saturate(mcov);
+			win_col = over(cam_col, win_col);
+		}
+
+		// ---- title bar
+		if (titlebar_enabled != 0 && inrect(p_anim, titlebar_rect)) {
+			float2 tl = p_anim - titlebar_rect.xy;
+			float tv = saturate(tl.y / max(titlebar_rect.w, 1.0));
+			float th = saturate(tl.x / max(titlebar_rect.z, 1.0));
+			float4 tb;
+			if (titlebar_style == 1) {
+				tb = luna_title(tv);
+			} else if (titlebar_style == 2) {
+				float n = saturate((luna_title(tv).b * 255.0 - 214.0) / 41.0);
+				tb = lerp(titlebar_color_b, titlebar_color_a, n);
+			} else if (titlebar_style == 3) {
+				tb = (fmod(floor(tl.y / 2.0), 2.0) < 1.0) ? titlebar_color_a : titlebar_color_b;
+				float tx = tl.x + titlebar_rect.x;
+				if (title_text_rect.z > 0.0 && tx >= title_text_rect.x - 8.0 && tx <= title_text_rect.x + title_text_rect.z + 8.0)
+					tb = titlebar_color_b;
+			} else if (titlebar_gradient != 0) {
+				tb = lerp(titlebar_color_a, titlebar_color_b, (titlebar_grad_horiz != 0) ? th : tv);
+			} else {
+				tb = titlebar_color_a;
+			}
+			win_col = over(tb, win_col);
+		}
+
+		// ---- Aero glass shine over frame + title (never over the camera)
+		if (glass_reflection > 0.0001 && !inrect(p_anim, body_rect)) {
+			float d = (local.x - local.y * 1.4) / max(window_rect.z, 1.0);
+			float band = smoothstep(0.10, 0.22, d) * (1.0 - smoothstep(0.22, 0.60, d));
+			float topfade = 1.0 - saturate(local.y / max(window_rect.w * 0.5, 1.0));
+			win_col.rgb = lerp(win_col.rgb, float3(1, 1, 1), band * topfade * glass_reflection * 0.55);
+			win_col.a = max(win_col.a, band * topfade * glass_reflection * 0.25);
+		}
+
+		if (titlebar_enabled != 0) {
+			// icon
+			if (inrect(p_anim, icon_rect) && icon_rect.z > 0.0) {
+				float2 q = p_anim - icon_rect.xy;
+				float4 ic = float4(0, 0, 0, 0);
+				if (icon_custom != 0)
+					ic = tex_at(icon_tex, q / icon_rect.zw);
+				else if (icon_mode != 0)
+					ic = draw_icon(icon_mode, q, icon_rect.zw);
+				win_col = over(ic, win_col);
+			}
+
+			// title text (1:1 texel mapping, optional shadow / glow)
+			if (title_text_rect.z > 0.0) {
+				if (title_shadow == 1) {
+					float4 s = sample_text(title_text, p_anim - float2(1, 1), title_text_rect, title_text_size);
+					win_col = over(float4(0, 0, 0, s.a * 0.55), win_col);
+				} else if (title_shadow == 2) {
+					float a = 0.0;
+					a += sample_text(title_text, p_anim + float2(-2.0, 0.0), title_text_rect, title_text_size).a;
+					a += sample_text(title_text, p_anim + float2(2.0, 0.0), title_text_rect, title_text_size).a;
+					a += sample_text(title_text, p_anim + float2(0.0, -2.0), title_text_rect, title_text_size).a;
+					a += sample_text(title_text, p_anim + float2(0.0, 2.0), title_text_rect, title_text_size).a;
+					a += sample_text(title_text, p_anim + float2(-1.5, -1.5), title_text_rect, title_text_size).a;
+					a += sample_text(title_text, p_anim + float2(1.5, -1.5), title_text_rect, title_text_size).a;
+					a += sample_text(title_text, p_anim + float2(-1.5, 1.5), title_text_rect, title_text_size).a;
+					a += sample_text(title_text, p_anim + float2(1.5, 1.5), title_text_rect, title_text_size).a;
+					a = saturate(a * 0.22);
+					win_col = over(float4(1, 1, 1, a * 0.85), win_col);
+				}
+				float4 t = sample_text(title_text, p_anim, title_text_rect, title_text_size);
+				win_col = over(t, win_col);
+			}
+		}
+
+		// ---- status bar
+		if (statusbar_enabled != 0 && inrect(p_anim, statusbar_rect)) {
+			win_col = over(statusbar_color, win_col);
+			if (frame_style == 1) {
+				float2 sl = p_anim - statusbar_rect.xy;
+				if (sl.y < 1.0)
+					win_col = hexc(128, 128, 128);
+			}
+			if (tiles_enabled != 0) {
+				float ts = statusbar_rect.w - 6.0;
+				float2 tq = p_anim - float2(statusbar_rect.x + 4.0, statusbar_rect.y + 3.0);
+				float tcell = ts + 4.0;
+				float ti = floor(tq.x / tcell);
+				if (ti >= 0.0 && ti < 3.0 && tq.y >= 0.0 && tq.y < ts && (tq.x - ti * tcell) < ts) {
+					float4 tc = tile_color;
+					tc.rgb = (ti < 0.5) ? tc.rgb : ((ti < 1.5) ? lerp(tc.rgb, float3(1, 1, 1), 0.35) : lerp(tc.rgb, float3(0, 0, 0), 0.35));
+					win_col = tc;
+				}
+			}
+			float4 t = sample_text(status_text, p_anim, status_text_rect, status_text_size);
+			win_col = over(t, win_col);
+		}
+
+		// ---- window buttons
+		if (titlebar_enabled != 0) {
+			for (int bi = 0; bi < 3; bi++) {
+				float4 brect = (bi == 0) ? btn_rect_0 : (bi == 1) ? btn_rect_1 : btn_rect_2;
+				float4 bcol  = (bi == 0) ? btn_color_0 : (bi == 1) ? btn_color_1 : btn_color_2;
+				int btype    = (bi == 0) ? btn_type_0 : (bi == 1) ? btn_type_1 : btn_type_2;
+				if (bi >= btn_count || brect.z <= 0.0)
+					continue;
+				if (p_anim.x < brect.x - 2.0 || p_anim.x > brect.x + brect.z + 2.0 ||
+				    p_anim.y < brect.y - 2.0 || p_anim.y > brect.y + brect.w + 2.0)
+					continue;
+				win_col = over(draw_button(p_anim, brect, bcol, btype, btn_style, (btype == btn_hover) ? 1 : 0), win_col);
+			}
+		}
+
+		// ---- border stroke(s), drawn inside the silhouette
+		if (border_enabled != 0) {
+			float e = -d_window;
+			float t = max(border_thickness, 0.0);
+			float dash = 1.0;
+			if (border_dashed != 0)
+				dash = (frac((p_anim.x + p_anim.y) / 10.0) < 0.5) ? 1.0 : 0.0;
+			float b1 = saturate(e + 0.5) * saturate(t + 0.5 - e);
+			win_col = over(float4(border_color.rgb, border_color.a * border_opacity * b1 * dash), win_col);
+			if (border_double != 0) {
+				float b2 = saturate(e - t + 0.5) * saturate(2.0 * t + 0.5 - e);
+				win_col = over(float4(border_inner_color.rgb, border_inner_color.a * b2 * dash), win_col);
+			}
+		}
+
+		// ---- Windows 11 Snap Layouts flyout
+		if (snap_enabled != 0 && inrect(p_anim, float4(snap_rect.x - 14.0, snap_rect.y - 14.0, snap_rect.z + 28.0, snap_rect.w + 28.0))) {
+			float4 sp = draw_snap(p_anim, snap_rect, (btn_symbol_color.r > 0.5) ? 1.0 : 0.0);
+			win_col = over(sp, win_col);
+		}
+
+		// ---- resize grip
+		if (resizegrip_enabled != 0 && inrect(p_anim, resizegrip_rect)) {
+			float2 gl = p_anim - resizegrip_rect.xy;
+			float u = (resizegrip_rect.z - gl.x) + (resizegrip_rect.w - gl.y);
+			for (int k = 0; k < 3; k++) {
+				float uk = 3.0 + 4.0 * k;
+				if (abs(u - uk) < 0.5)
+					win_col = hexc(128, 128, 128);
+				else if (abs(u - (uk + 1.0)) < 0.5)
+					win_col = hexc(255, 255, 255);
+			}
+		}
+
+		win_col.a *= win_cov;
+		result = over(win_col, result);
+	}
+
+	result.a *= saturate(anim_alpha);
+	return result;
+}
+
+technique Draw
+{
+	pass
+	{
+		vertex_shader = VSDefault(v_in);
+		pixel_shader  = PSWinFrame(v_in);
+	}
+}
