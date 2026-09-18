@@ -13,6 +13,9 @@ struct wf_prefs {
 	char update_url[512];   /* URL of a small JSON file: {"version","url"}   */
 	char download_url[512]; /* default URL in the "Download presets" dialog  */
 	bool welcome_shown;     /* first-run dialog already displayed            */
+	bool http_enabled;      /* local web address for toasts / assistant      */
+	int http_port;          /* 1024..65535, default 17870                    */
+	char http_token[48];    /* secret required on every request (generated)  */
 };
 
 void wf_prefs_load(void);

@@ -1,0 +1,195 @@
+// "Windows is installing updates" screens. One full-canvas shader draws the
+// background, dialog chrome, progress bar and spinner for seven Windows eras;
+// all text is drawn separately from GDI textures. Colours are gamma-space.
+//
+// ver: 0 Windows 2000 setup, 1 Windows 98 setup, 2 XP, 3 Vista / 7,
+//      4 Windows 8, 5 Windows 10, 6 Windows 11
+
+uniform float4x4 ViewProj;
+
+uniform float2 quad_size;
+uniform int    ver;
+uniform float  pct;      // 0..1
+uniform float  time;     // seconds
+uniform float  u;        // pixels per design unit (canvas height / 1080 * size)
+uniform float4 dlg;      // dialog / panel rect
+uniform float4 bar;      // progress bar rect
+uniform float4 btn;      // disabled button rect (Windows 98)
+uniform float4 spin;     // spinner centre x, y, ring radius, dot radius
+uniform float3 tint;     // background colour for Windows 8 / 10 / 11
+
+struct VertData {
+	float4 pos : POSITION;
+	float2 uv  : TEXCOORD0;
+};
+
+VertData VSDefault(VertData v_in)
+{
+	VertData vert_out;
+	vert_out.pos = mul(float4(v_in.pos.xyz, 1.0), ViewProj);
+	vert_out.uv  = v_in.uv;
+	return vert_out;
+}
+
+float cov(float d)
+{
+	return saturate(0.5 - d);
+}
+
+float sdBox(float2 p, float2 b, float r)
+{
+	float2 q = abs(p) - b + r;
+	return min(max(q.x, q.y), 0.0) + length(max(q, 0.0)) - r;
+}
+
+bool inRect(float2 p, float4 r)
+{
+	return p.x >= r.x && p.y >= r.y && p.x < r.x + r.z && p.y < r.y + r.w;
+}
+
+// Windows 9x / 2000 bevel. raised: 1 = button / window, 0 = sunken field
+float3 bevel(float2 p, float4 r, float raised, float3 face, float b)
+{
+	float2 l = p - r.xy;
+	float dl = l.x, dt = l.y, dr = r.z - l.x, db = r.w - l.y;
+	float3 hi = float3(1, 1, 1), lo = float3(0.0, 0.0, 0.0);
+	float3 mhi = float3(0.875, 0.875, 0.875), mlo = float3(0.50, 0.50, 0.50);
+	if (raised < 0.5) {
+		float3 t = hi; hi = lo; lo = t;
+		t = mhi; mhi = mlo; mlo = t;
+	}
+	bool br0 = (dr < b || db < b);
+	bool tl0 = (dl < b || dt < b);
+	bool br1 = (dr < 2.0 * b || db < 2.0 * b);
+	bool tl1 = (dl < 2.0 * b || dt < 2.0 * b);
+	if (br0) return lo;
+	if (tl0) return hi;
+	if (br1) return mlo;
+	if (tl1) return mhi;
+	return face;
+}
+
+float dots_spinner(float2 p)
+{
+	float best = 1e4;
+	for (int i = 0; i < 5; i++) {
+		float a = frac(time * 0.42 - (float)i * 0.075);
+		float e = a * a * (3.0 - 2.0 * a);
+		float ang = -1.5707963 + e * 6.2831853;
+		float2 c = spin.xy + spin.z * float2(cos(ang), sin(ang));
+		best = min(best, length(p - c) - spin.w);
+	}
+	return best;
+}
+
+float4 PSUpdate(VertData v_in) : TARGET
+{
+	float2 p = v_in.uv * quad_size;
+	float b = max(1.0, floor(u + 0.5));
+	float3 col = float3(0, 0, 0);
+
+	if (ver == 0) {
+		// ---- Windows 2000 / NT text-mode setup
+		col = float3(0.0, 0.0, 0.667);
+		if (inRect(p, dlg)) {
+			col = bevel(p, dlg, 1.0, float3(0.753, 0.753, 0.753), b);
+			// gauge: sunken white field with a blue fill
+			if (inRect(p, bar)) {
+				col = bevel(p, bar, 0.0, float3(1, 1, 1), b);
+				float x0 = bar.x + 2.0 * b, x1 = bar.x + bar.z - 2.0 * b;
+				if (p.x >= x0 && p.x < x0 + (x1 - x0) * pct && p.y > bar.y + 2.0 * b && p.y < bar.y + bar.w - 2.0 * b)
+					col = float3(0.0, 0.0, 0.667);
+			}
+		}
+		// status line along the bottom edge
+		if (p.y > quad_size.y - 34.0 * u)
+			col = float3(0.753, 0.753, 0.753);
+	} else if (ver == 1) {
+		// ---- Windows 98 setup dialog on the teal desktop
+		col = float3(0.0, 0.502, 0.502);
+		if (inRect(p, dlg)) {
+			col = bevel(p, dlg, 1.0, float3(0.753, 0.753, 0.753), b);
+			float2 l = p - dlg.xy;
+			// title bar
+			float th = 34.0 * u;
+			if (l.x > 3.0 * b && l.x < dlg.z - 3.0 * b && l.y > 3.0 * b && l.y < 3.0 * b + th) {
+				float g = saturate((l.x - 3.0 * b) / (dlg.z - 6.0 * b));
+				col = lerp(float3(0.0, 0.0, 0.502), float3(0.063, 0.518, 0.816), g);
+			}
+			if (inRect(p, bar)) {
+				col = bevel(p, bar, 0.0, float3(0.753, 0.753, 0.753), b);
+				float4 inner = float4(bar.x + 3.0 * b, bar.y + 3.0 * b, bar.z - 6.0 * b, bar.w - 6.0 * b);
+				float bw = 16.0 * u, gap = 3.0 * u;
+				float stp = bw + gap;
+				float nblk = floor(pct * inner.z / stp);
+				float ix = p.x - inner.x;
+				float idx = floor(ix / stp);
+				if (inRect(p, inner) && idx < nblk && (ix - idx * stp) < bw)
+					col = float3(0.0, 0.0, 0.502);
+			}
+			if (inRect(p, btn))
+				col = bevel(p, btn, 1.0, float3(0.753, 0.753, 0.753), b);
+		}
+	} else if (ver == 2) {
+		// ---- Windows XP
+		float yn = p.y / quad_size.y;
+		col = float3(0.353, 0.494, 0.863);
+		float top = 0.115, bot = 0.86;
+		if (yn < top)
+			col = float3(0.0, 0.188, 0.612);
+		if (yn > bot)
+			col = float3(0.0, 0.2, 0.6);
+		// orange hairlines with a soft glow where the bands meet the centre
+		float ly = abs(yn - top) * quad_size.y;
+		float ly2 = abs(yn - bot) * quad_size.y;
+		float glow = exp(-ly / (14.0 * u)) * step(top, yn) + exp(-ly2 / (14.0 * u)) * step(yn, bot);
+		col = lerp(col, float3(0.98, 0.62, 0.25), glow * 0.18);
+		float line1 = saturate(1.0 - ly / (2.0 * b));
+		float line2 = saturate(1.0 - ly2 / (2.0 * b));
+		col = lerp(col, float3(0.95, 0.55, 0.20), max(line1, line2) * 0.9);
+		// progress track with green blocks
+		float2 bc = bar.xy + bar.zw * 0.5;
+		float dtrk = sdBox(p - bc, bar.zw * 0.5, 7.0 * u);
+		if (dtrk < 1.0) {
+			float3 trk = float3(0.97, 0.98, 1.0);
+			col = lerp(col, float3(0.62, 0.7, 0.85), cov(abs(dtrk + 0.5) - 0.5));
+			col = lerp(col, trk, cov(dtrk + 1.0));
+			float4 inner = float4(bar.x + 4.0 * u, bar.y + 4.0 * u, bar.z - 8.0 * u, bar.w - 8.0 * u);
+			float bw = 14.0 * u, gap = 3.0 * u;
+			float step2 = bw + gap;
+			float nblk = floor(pct * inner.z / step2);
+			float ix = p.x - inner.x;
+			float idx = floor(ix / step2);
+			if (inRect(p, inner) && idx < nblk && (ix - idx * step2) < bw && dtrk < -1.5) {
+				float gy = saturate((p.y - inner.y) / inner.w);
+				float3 g = lerp(float3(0.62, 0.95, 0.55), float3(0.10, 0.62, 0.12), abs(gy - 0.35) * 1.6);
+				col = g;
+			}
+		}
+	} else if (ver == 3) {
+		// ---- Windows Vista / 7: black screen with white text
+		float2 c = quad_size * float2(0.5, 0.5);
+		col = float3(0.0, 0.0, 0.0);
+		float vg = saturate(1.0 - length((p - c) / quad_size) * 1.5);
+		col += float3(0.0, 0.03, 0.07) * vg;
+	} else {
+		// ---- Windows 8 / 10 / 11: flat colour with a ring of dots
+		col = tint;
+		if (ver == 6) {
+			float vg = saturate(1.0 - length((p - quad_size * 0.5) / quad_size) * 1.6);
+			col += float3(0.0, 0.02, 0.05) * vg;
+		}
+		float dd = dots_spinner(p);
+		col = lerp(col, float3(1, 1, 1), cov(dd));
+	}
+	return float4(col, 1.0);
+}
+
+technique Draw
+{
+	pass
+	{
+		vertex_shader = VSDefault(v_in);
+		pixel_shader  = PSUpdate(v_in);
+	}
+}

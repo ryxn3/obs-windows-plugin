@@ -23,6 +23,18 @@ gs_texture_t *win_frame_render_text_atlas(const char *const *lines, int count, c
 					   int font_size_px, bool bold, uint32_t color_abgr, uint32_t *out_w,
 					   uint32_t *out_line_h, float *out_widths);
 
+/* Word-wrapped text block: optional small header line, optional bold title,
+ * and a wrapped body of at most max_body_lines lines (extra text is cut with
+ * an ellipsis). The texture size is computed from the FULL text, so revealing
+ * it progressively (reveal_chars = number of body characters drawn, -1 = all)
+ * never changes the size or the line breaks - ideal for a typewriter effect.
+ * header_indent leaves room for an icon before the header text.
+ * Enters the graphics context. Returns NULL on failure. */
+gs_texture_t *win_frame_render_text_wrapped(const char *header, int header_indent, const char *title,
+					     const char *body, const char *font_name, int font_px, int max_w,
+					     int max_body_lines, uint32_t header_abgr, uint32_t title_abgr,
+					     uint32_t body_abgr, int reveal_chars, uint32_t *out_w, uint32_t *out_h);
+
 #ifdef __cplusplus
 }
 #endif

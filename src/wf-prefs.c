@@ -1,4 +1,9 @@
 #include <string.h>
+#include <stdio.h>
+#if defined(_WIN32)
+#include <windows.h>
+#include <bcrypt.h>
+#endif
 #include <obs-module.h>
 #include <util/platform.h>
 #include "wf-prefs.h"
@@ -23,6 +28,22 @@ static void set_defaults(void)
 	memset(&g_prefs, 0, sizeof(g_prefs));
 	copy_str(g_prefs.default_style, sizeof(g_prefs.default_style), "winxp_luna");
 	copy_str(g_prefs.update_url, sizeof(g_prefs.update_url), WF_DEFAULT_UPDATE_URL);
+	g_prefs.http_port = 17870;
+}
+
+/* 24 random hex characters from the system's secure generator */
+static void make_token(char *out, size_t n)
+{
+	unsigned char rnd[12] = {0};
+#if defined(_WIN32)
+	BCryptGenRandom(NULL, rnd, sizeof(rnd), BCRYPT_USE_SYSTEM_PREFERRED_RNG);
+#endif
+	if (n < 25) {
+		out[0] = 0;
+		return;
+	}
+	for (int i = 0; i < 12; i++)
+		snprintf(out + i * 2, 3, "%02x", rnd[i]);
 }
 
 static char *prefs_path(void)
@@ -49,12 +70,17 @@ void wf_prefs_load(void)
 	g_loaded = true;
 
 	char *path = prefs_path();
-	if (!path)
+	if (!path) {
+		make_token(g_prefs.http_token, sizeof(g_prefs.http_token));
 		return;
+	}
 	obs_data_t *d = obs_data_create_from_json_file_safe(path, "bak");
 	bfree(path);
-	if (!d)
-		return; /* missing or corrupt: keep defaults */
+	if (!d) { /* missing or corrupt: keep defaults, create a token */
+		make_token(g_prefs.http_token, sizeof(g_prefs.http_token));
+		wf_prefs_save();
+		return;
+	}
 
 	const char *v = obs_data_get_string(d, "default_style");
 	if (v && *v)
@@ -64,7 +90,16 @@ void wf_prefs_load(void)
 		copy_str(g_prefs.update_url, sizeof(g_prefs.update_url), v);
 	copy_str(g_prefs.download_url, sizeof(g_prefs.download_url), obs_data_get_string(d, "download_url"));
 	g_prefs.welcome_shown = obs_data_get_bool(d, "welcome_shown");
+	g_prefs.http_enabled = obs_data_get_bool(d, "http_enabled");
+	int port = (int)obs_data_get_int(d, "http_port");
+	if (port >= 1024 && port <= 65535)
+		g_prefs.http_port = port;
+	copy_str(g_prefs.http_token, sizeof(g_prefs.http_token), obs_data_get_string(d, "http_token"));
 	obs_data_release(d);
+	if (!g_prefs.http_token[0]) {
+		make_token(g_prefs.http_token, sizeof(g_prefs.http_token));
+		wf_prefs_save();
+	}
 }
 
 void wf_prefs_save(void)
@@ -77,6 +112,9 @@ void wf_prefs_save(void)
 	obs_data_set_string(d, "update_url", g_prefs.update_url);
 	obs_data_set_string(d, "download_url", g_prefs.download_url);
 	obs_data_set_bool(d, "welcome_shown", g_prefs.welcome_shown);
+	obs_data_set_bool(d, "http_enabled", g_prefs.http_enabled);
+	obs_data_set_int(d, "http_port", g_prefs.http_port);
+	obs_data_set_string(d, "http_token", g_prefs.http_token);
 	obs_data_save_json_safe(d, path, "tmp", "bak");
 	obs_data_release(d);
 	bfree(path);

@@ -3,6 +3,8 @@
  * add-filter, copy-style, framed-source enumeration, HTTPS fetch, preset
  * download error handling and update-check parsing.
  */
+#include <winsock2.h>
+#include <ws2tcpip.h>
 #include <obs.h>
 #include <util/base.h>
 #include <util/platform.h>
@@ -11,6 +13,7 @@
 #include "../../src/wf-actions.h"
 #include "../../src/wf-prefs.h"
 #include "../../src/wf-http.h"
+#include "../../src/wf-notify.h"
 #include "../../src/win-frame-filter.h"
 #include "../../src/win-frame-styles.h"
 
@@ -62,6 +65,29 @@ static void set_style_cb(obs_source_t *owner, obs_source_t *flt, void *p)
 		obs_source_update(flt, s);
 		obs_data_release(s);
 	}
+}
+
+/* raw HTTP client for the localhost notification server */
+static int http_raw(int port, const char *req, char *out, size_t n)
+{
+	SOCKET s = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+	struct sockaddr_in a;
+	memset(&a, 0, sizeof(a));
+	a.sin_family = AF_INET;
+	a.sin_port = htons((u_short)port);
+	inet_pton(AF_INET, "127.0.0.1", &a.sin_addr);
+	if (connect(s, (struct sockaddr *)&a, sizeof(a)) != 0) {
+		closesocket(s);
+		return -1;
+	}
+	send(s, req, (int)strlen(req), 0);
+	size_t got = 0;
+	int r;
+	while (got < n - 1 && (r = recv(s, out + got, (int)(n - 1 - got), 0)) > 0)
+		got += (size_t)r;
+	out[got] = 0;
+	closesocket(s);
+	return (int)got;
 }
 
 int main(int argc, char **argv)
@@ -172,6 +198,118 @@ int main(int argc, char **argv)
 			obs_source_release(tr);
 		}
 		CHECK(obs_source_get_display_name("win_alttab_transition") != NULL, "it has a display name for the transitions list");
+	}
+
+	printf("new sources (toast / paperclip / update screen)\n");
+	{
+		const char *ids[] = {"win_toast_source", "win_paperclip_assistant", "win_update_screen"};
+		const char *keys[] = {"t_style", "a_theme", "u_version"};
+		for (int i = 0; i < 3; i++) {
+			obs_source_t *src = obs_source_create_private(ids[i], "s", NULL);
+			CHECK(src != NULL, "the source can be created");
+			if (src) {
+				obs_properties_t *tp = obs_source_properties(src);
+				CHECK(obs_properties_get(tp, keys[i]) != NULL, "its main control exists");
+				CHECK(obs_source_get_width(src) >= 320, "it has a canvas size");
+				obs_properties_destroy(tp);
+				obs_source_release(src);
+			}
+		}
+	}
+
+	printf("notification queue, parser and file watcher\n");
+	{
+		struct wf_msg m;
+		CHECK(wf_msg_parse_line("{\"type\":\"sub\",\"title\":\"T\",\"text\":\"Body\"}", &m) && !strcmp(m.type, "sub") &&
+			      !strcmp(m.title, "T") && !strcmp(m.text, "Body"),
+		      "parses JSON");
+		CHECK(wf_msg_parse_line("follow|Hi|Someone followed", &m) && !strcmp(m.type, "follow") &&
+			      !strcmp(m.text, "Someone followed"),
+		      "parses type|title|text");
+		CHECK(wf_msg_parse_line("Just text", &m) && !strcmp(m.text, "Just text"), "parses plain text");
+		CHECK(!wf_msg_parse_line("   ", &m), "ignores blank lines");
+		struct wf_msg a = {"info", "one", "1"}, b = {"info", "two", "2"};
+		wf_notify_push(WF_TARGET_TOAST, &a);
+		wf_notify_push(WF_TARGET_TOAST, &b);
+		CHECK(!wf_notify_pop(WF_TARGET_ASSISTANT, &m), "queues are separate per target");
+		CHECK(wf_notify_pop(WF_TARGET_TOAST, &m) && !strcmp(m.title, "one"), "FIFO order (first)");
+		CHECK(wf_notify_pop(WF_TARGET_TOAST, &m) && !strcmp(m.title, "two"), "FIFO order (second)");
+		CHECK(!wf_notify_pop(WF_TARGET_TOAST, &m), "empty after draining");
+		for (int i = 0; i < 100; i++)
+			wf_notify_push(WF_TARGET_TOAST, &a);
+		int cnt = 0;
+		while (wf_notify_pop(WF_TARGET_TOAST, &m))
+			cnt++;
+		CHECK(cnt == 64, "queue holds at most 64 messages");
+
+		os_mkdirs("E:/obs windows plugin/build/rt-config");
+		const char *path = "E:/obs windows plugin/build/rt-config/tail_test.txt";
+		FILE *f = fopen(path, "wb");
+		fputs("old line that must be ignored\n", f);
+		fclose(f);
+		struct wf_filetail ft;
+		memset(&ft, 0, sizeof(ft));
+		wf_filetail_set(&ft, path);
+		wf_filetail_poll(&ft, WF_TARGET_TOAST);
+		CHECK(!wf_notify_pop(WF_TARGET_TOAST, &m), "existing file content is ignored");
+		f = fopen(path, "ab");
+		fputs("chat|Chat|hello there\nhalf a li", f);
+		fclose(f);
+		wf_filetail_poll(&ft, WF_TARGET_TOAST);
+		CHECK(wf_notify_pop(WF_TARGET_TOAST, &m) && !strcmp(m.text, "hello there"), "new line becomes a message");
+		CHECK(!wf_notify_pop(WF_TARGET_TOAST, &m), "an unfinished line waits");
+		f = fopen(path, "ab");
+		fputs("ne\n", f);
+		fclose(f);
+		wf_filetail_poll(&ft, WF_TARGET_TOAST);
+		CHECK(wf_notify_pop(WF_TARGET_TOAST, &m) && !strcmp(m.text, "half a line"), "the finished line arrives");
+	}
+
+	printf("localhost notification server\n");
+	{
+		WSADATA wsa;
+		WSAStartup(MAKEWORD(2, 2), &wsa);
+		struct wf_prefs *pr = wf_prefs_get();
+		pr->http_enabled = false;
+		wf_notify_http_apply_prefs();
+		CHECK(!wf_notify_http_running(), "off by default: no server");
+		pr->http_enabled = true;
+		pr->http_port = 17999;
+		strcpy(pr->http_token, "testtoken123");
+		wf_notify_http_acquire();
+		os_sleep_ms(400);
+		CHECK(wf_notify_http_running(), "starts when enabled and a source exists");
+		char resp[2048];
+		struct wf_msg m;
+		http_raw(17999, "GET /toast?title=A&text=B HTTP/1.1\r\nHost: x\r\n\r\n", resp, sizeof(resp));
+		CHECK(strstr(resp, " 401 ") != NULL, "no token -> 401");
+		http_raw(17999, "GET /toast?title=A&text=B&token=wrong HTTP/1.1\r\nHost: x\r\n\r\n", resp, sizeof(resp));
+		CHECK(strstr(resp, " 401 ") != NULL, "wrong token -> 401");
+		CHECK(!wf_notify_pop(WF_TARGET_TOAST, &m), "nothing queued by rejected requests");
+		http_raw(17999,
+			 "GET /toast?title=Hello&text=World+wide&type=follow&token=testtoken123 HTTP/1.1\r\nHost: x\r\n\r\n",
+			 resp, sizeof(resp));
+		CHECK(strstr(resp, " 200 ") != NULL, "right token in the query -> 200");
+		CHECK(wf_notify_pop(WF_TARGET_TOAST, &m) && !strcmp(m.title, "Hello") && !strcmp(m.text, "World wide") &&
+			      !strcmp(m.type, "follow"),
+		      "GET fields reach the toast queue");
+		const char *body = "{\"title\":\"J\",\"text\":\"from json\"}";
+		char req[512];
+		snprintf(req, sizeof(req),
+			 "POST /assistant HTTP/1.1\r\nHost: x\r\nX-WF-Token: testtoken123\r\nContent-Length: %d\r\n\r\n%s",
+			 (int)strlen(body), body);
+		http_raw(17999, req, resp, sizeof(resp));
+		CHECK(strstr(resp, " 200 ") != NULL, "POST with the token header -> 200");
+		CHECK(wf_notify_pop(WF_TARGET_ASSISTANT, &m) && !strcmp(m.text, "from json"),
+		      "JSON body reaches the assistant queue");
+		http_raw(17999, "GET /nothing?token=testtoken123 HTTP/1.1\r\nHost: x\r\n\r\n", resp, sizeof(resp));
+		CHECK(strstr(resp, " 404 ") != NULL, "unknown path -> 404");
+		wf_notify_http_release();
+		os_sleep_ms(300);
+		CHECK(!wf_notify_http_running(), "stops when the last source is gone");
+		CHECK(http_raw(17999, "GET / HTTP/1.1\r\n\r\n", resp, sizeof(resp)) < 0, "port is closed afterwards");
+		pr->http_enabled = false;
+		WSACleanup();
 	}
 
 	printf("update check\n");

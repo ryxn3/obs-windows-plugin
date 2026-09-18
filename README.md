@@ -455,6 +455,50 @@ revealed.
 `transition-test` (built with `-DWF_BUILD_RENDER_TEST=ON`) renders the transition
 at chosen moments for every version into a PNG so it can be checked without OBS.
 
+## 5g. Toasts, Paperclip assistant and Windows Update screen (v1.3.0)
+
+Three new **sources** (Sources > + > ...). Each one is a transparent (or full
+screen) canvas you can place on top of a scene.
+
+**Windows Notification Toasts** - pop-ups that slide in from a corner, stack and
+slide out, in five looks: XP balloon, Vista/7 balloon, Windows 8, Windows 10 and
+Windows 11 (dark/light, accent colour, size, seconds on screen, toasts at once).
+Icons for follower / subscriber / donation / chat / info are drawn by the shader.
+
+**Paperclip Assistant** - an original wire-paperclip character with googly eyes
+that idles, blinks, looks around and hops when it has something to say. It shows
+a speech balloon (classic yellow or modern dark) with typewriter text: tips on a
+timer (your own list, one per line) or messages you send it.
+
+**Windows Update Screen** - "Working on updates" for a "stream starting soon"
+scene, in seven versions: Windows 2000 text-mode setup, Windows 98 setup dialog,
+XP, Vista/7, 8/8.1, 10 and 11. Progress comes from a countdown (with realistic
+stalls), a clock time ("starts at 20:00") or a manual percent, and it can show
+"Starting in 4:32". Title, message and the text at 100% are editable.
+
+### Sending messages to toasts and the assistant
+
+1. Menu > *Camera Frame* > *Test Toast / Assistant* sends a test message.
+2. Every source has a **Watch Text File** option: each new line appended to the
+   file becomes a message (works with Stream Labels, chat bot logs, ...).
+   Line formats: `{"type":"sub","title":"Hi","text":"..."}`, `type|title|text`,
+   `title|text`, or plain text. Types: `follow`, `sub`, `donation`, `chat`, `info`.
+3. Optional local web address. Settings > *Allow other programs on this PC...*
+   (**off by default**). It listens on `127.0.0.1` only, and every request must
+   carry the secret token shown in Settings (`?token=` or header `X-WF-Token`);
+   anything else gets `401`. Example:
+
+   ```
+   http://127.0.0.1:17870/toast?token=YOURTOKEN&type=follow&title=New%20follower&text=Alex
+   http://127.0.0.1:17870/assistant?token=YOURTOKEN&text=Time%20for%20a%20break!
+   ```
+   `POST` with a JSON body works too. It runs only while a toast/assistant
+   source exists.
+
+`source-test` (built with `-DWF_BUILD_RENDER_TEST=ON`) renders any of these
+sources to a PNG without OBS; `logic-test` also checks the queue, the file
+watcher and the web address (token, 401/404, port closes afterwards).
+
 ## 6. Known simplifications (and what "full" would take)
 
 | Area | What's implemented | What a fuller version needs |

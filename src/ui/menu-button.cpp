@@ -16,6 +16,7 @@
 #include <QApplication>
 #include <QEvent>
 #include <QMainWindow>
+#include "../wf-notify.h"
 #include <QMenu>
 #include <QMenuBar>
 #include <QMessageBox>
@@ -75,6 +76,20 @@ static void build_menu(QMainWindow *win)
 
 	QAction *copy = g_menu->addAction("Copy Style Between Sources...");
 	QObject::connect(copy, &QAction::triggered, win, []() { wf_ui_show_copy_dialog(); });
+
+	g_menu->addSeparator();
+
+	QMenu *tests = g_menu->addMenu("Test Toast / Assistant");
+	QAction *tt = tests->addAction("Send Test Toast");
+	QObject::connect(tt, &QAction::triggered, win, []() {
+		struct wf_msg m = {"follow", "New follower", "Oskar just followed the stream!"};
+		wf_notify_push(WF_TARGET_TOAST, &m);
+	});
+	QAction *ta = tests->addAction("Send Test Assistant Message");
+	QObject::connect(ta, &QAction::triggered, win, []() {
+		struct wf_msg m = {"tip", "", "It looks like you're streaming. Would you like help with that?"};
+		wf_notify_push(WF_TARGET_ASSISTANT, &m);
+	});
 
 	g_menu->addSeparator();
 

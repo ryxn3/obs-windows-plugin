@@ -2,6 +2,7 @@
 // No Q_OBJECT classes are used (handlers are lambdas), so no moc step is needed.
 
 #include "dialogs.h"
+#include "../wf-notify.h"
 
 #include <obs-frontend-api.h>
 #include <obs-module.h>
@@ -28,6 +29,8 @@
 #include <QPointer>
 #include <QPushButton>
 #include <QStatusBar>
+#include <QSpinBox>
+#include <QClipboard>
 #include <QStringList>
 #include <QUrl>
 #include <QVBoxLayout>
@@ -371,6 +374,29 @@ extern "C" void wf_ui_show_settings_dialog(void)
 	form->addRow("Default style for new frames:", style);
 	form->addRow("Update check URL:", update);
 	form->addRow("Preset download URL:", download);
+
+	auto *http = new QCheckBox("Allow other programs on this PC to send toasts / assistant messages");
+	http->setChecked(pr->http_enabled);
+	auto *port = new QSpinBox();
+	port->setRange(1024, 65535);
+	port->setValue(pr->http_port);
+	auto *token = new QLineEdit(QString::fromUtf8(pr->http_token));
+	token->setReadOnly(true);
+	auto *copy_url = new QPushButton("Copy example address");
+	auto *hint = new QLabel("Only this computer can connect (127.0.0.1), and every request must carry the secret "
+				"token. Leave this off unless you use it. Toast source: /toast   Assistant: /assistant");
+	hint->setWordWrap(true);
+	form->addRow(http);
+	form->addRow("Port:", port);
+	form->addRow("Secret token:", token);
+	form->addRow(copy_url);
+	form->addRow(hint);
+	QObject::connect(copy_url, &QPushButton::clicked, dlg, [=]() {
+		QString u = QString("http://127.0.0.1:%1/toast?token=%2&title=Hello&text=It%20works")
+				    .arg(port->value())
+				    .arg(token->text());
+		QApplication::clipboard()->setText(u);
+	});
 	auto *lay = new QVBoxLayout(dlg);
 	lay->addLayout(form);
 	lay->addWidget(welcome);
@@ -389,7 +415,10 @@ extern "C" void wf_ui_show_settings_dialog(void)
 		strncpy(p->update_url, update->text().trimmed().toUtf8().constData(), sizeof(p->update_url) - 1);
 		strncpy(p->download_url, download->text().trimmed().toUtf8().constData(), sizeof(p->download_url) - 1);
 		p->welcome_shown = !welcome->isChecked();
+		p->http_enabled = http->isChecked();
+		p->http_port = port->value();
 		wf_prefs_save();
+		wf_notify_http_apply_prefs();
 		dlg->accept();
 	});
 	QObject::connect(cancel, &QPushButton::clicked, dlg, &QDialog::reject);

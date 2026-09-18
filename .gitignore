@@ -12,3 +12,4 @@ CMakeUserPresets.json
 dist/
 __pycache__/
 *.pyc
+scratch/

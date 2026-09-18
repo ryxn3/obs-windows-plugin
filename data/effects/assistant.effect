@@ -1,0 +1,224 @@
+// Paperclip assistant: a wire paperclip with googly eyes (original artwork,
+// drawn from signed-distance shapes) and a speech balloon whose text comes
+// from a pre-rendered texture. Colour maths is done in gamma space.
+
+uniform float4x4 ViewProj;
+uniform texture2d text_tex;
+
+uniform float2 quad_size;   // canvas size in px
+uniform float3 char_box;    // centre x, centre y, box size (px)
+uniform float4 pose;        // wiggle angle (rad), squash x, squash y, time (s)
+uniform float4 eyes;        // blink 0..1, look x, look y, mood 0..1
+uniform float4 bubble;      // x y w h (px)
+uniform float2 apex;        // tail tip (px)
+uniform float2 text_pos;
+uniform float2 text_size;
+uniform float  balpha;      // bubble opacity 0..1
+uniform int    theme;       // 0 classic yellow balloon, 1 modern dark card
+uniform float  ui;
+
+sampler_state linear_clamp {
+	Filter   = Linear;
+	AddressU = Clamp;
+	AddressV = Clamp;
+};
+
+struct VertData {
+	float4 pos : POSITION;
+	float2 uv  : TEXCOORD0;
+};
+
+VertData VSDefault(VertData v_in)
+{
+	VertData vert_out;
+	vert_out.pos = mul(float4(v_in.pos.xyz, 1.0), ViewProj);
+	vert_out.uv  = v_in.uv;
+	return vert_out;
+}
+
+float cov(float d)
+{
+	return saturate(0.5 - d);
+}
+
+float sdBox(float2 p, float2 b, float r)
+{
+	float2 q = abs(p) - b + r;
+	return min(max(q.x, q.y), 0.0) + length(max(q, 0.0)) - r;
+}
+
+float sdSeg(float2 p, float2 a, float2 b)
+{
+	float2 pa = p - a;
+	float2 ba = b - a;
+	float h = saturate(dot(pa, ba) / dot(ba, ba));
+	return length(pa - ba * h);
+}
+
+float4 over(float4 src, float4 dst)
+{
+	float a = src.a + dst.a * (1.0 - src.a);
+	float3 c = (src.rgb * src.a + dst.rgb * dst.a * (1.0 - src.a)) / max(a, 1e-5);
+	return float4(c, a);
+}
+
+// half rings (y grows downward): lower = the half with y >= centre
+float sdArcLower(float2 q, float2 c, float r)
+{
+	if (q.y >= c.y)
+		return abs(length(q - c) - r);
+	return min(length(q - c - float2(-r, 0)), length(q - c - float2(r, 0)));
+}
+
+float sdArcUpper(float2 q, float2 c, float r)
+{
+	if (q.y <= c.y)
+		return abs(length(q - c) - r);
+	return min(length(q - c - float2(-r, 0)), length(q - c - float2(r, 0)));
+}
+
+// centre line of the paperclip wire, in a unit box
+float sdClip(float2 q)
+{
+	float d = sdSeg(q, float2(0.34, 0.28), float2(0.34, 0.72));
+	d = min(d, sdArcLower(q, float2(0.50, 0.72), 0.16));
+	d = min(d, sdSeg(q, float2(0.66, 0.72), float2(0.66, 0.20)));
+	d = min(d, sdArcUpper(q, float2(0.53, 0.20), 0.13));
+	d = min(d, sdSeg(q, float2(0.40, 0.20), float2(0.40, 0.62)));
+	d = min(d, sdArcLower(q, float2(0.47, 0.62), 0.07));
+	d = min(d, sdSeg(q, float2(0.54, 0.62), float2(0.54, 0.30)));
+	return d;
+}
+
+float tail_dist(float2 p, float2 a, float2 b, float2 tip)
+{
+	float2 e0 = b - a, e1 = tip - b, e2 = a - tip;
+	float2 v0 = p - a, v1 = p - b, v2 = p - tip;
+	float2 p0 = v0 - e0 * saturate(dot(v0, e0) / dot(e0, e0));
+	float2 p1 = v1 - e1 * saturate(dot(v1, e1) / dot(e1, e1));
+	float2 p2 = v2 - e2 * saturate(dot(v2, e2) / dot(e2, e2));
+	float s = sign(e0.x * e2.y - e0.y * e2.x);
+	float2 d = min(min(float2(dot(p0, p0), s * (v0.x * e0.y - v0.y * e0.x)),
+			   float2(dot(p1, p1), s * (v1.x * e1.y - v1.y * e1.x))),
+		       float2(dot(p2, p2), s * (v2.x * e2.y - v2.y * e2.x)));
+	return -sqrt(d.x) * sign(d.y);
+}
+
+float4 eye_layer(float2 q, float2 ec, float px, float side)
+{
+	float blink = eyes.x;
+	float mood = eyes.w;
+	float r = 0.060 + 0.010 * mood;
+	float2 e = q - ec;
+	float open = max(1.0 - blink * 0.93, 0.07);
+	e.y /= open;
+	float d = (length(e) - r) * open;
+	float4 o = float4(0, 0, 0, 0);
+	// white with a thin dark rim
+	o = float4(float3(1, 1, 1), cov(d / px));
+	float rim = cov((abs(d + 0.004) - 0.004) / px);
+	o.rgb = lerp(o.rgb, float3(0.08, 0.08, 0.10), rim);
+	// pupil follows the look direction
+	float2 pc = float2(eyes.y, eyes.z) * 0.026;
+	float pd = length(e - pc) - (0.026 + 0.006 * mood);
+	float pa = cov(pd / px) * o.a;
+	o.rgb = lerp(o.rgb, float3(0.03, 0.03, 0.05), pa);
+	// tiny highlight
+	float hl = cov((length(e - pc - float2(-0.009, -0.009)) - 0.008) / px) * pa;
+	o.rgb = lerp(o.rgb, float3(1, 1, 1), hl);
+	// eyebrow
+	float lift = 0.012 + 0.03 * mood;
+	float tilt = -side * (0.012 + 0.006 * mood);
+	float bd = sdSeg(q, ec + float2(-0.055, -0.098 - lift + tilt), ec + float2(0.055, -0.098 - lift - tilt)) - 0.0075;
+	float4 brow = float4(0.10, 0.10, 0.12, cov(bd / px));
+	return over(o, brow);
+}
+
+float4 PSAssistant(VertData v_in) : TARGET
+{
+	float2 p = v_in.uv * quad_size;
+	float4 out_col = float4(0, 0, 0, 0);
+
+	// ---------------- speech balloon
+	if (balpha > 0.001) {
+		float2 bc = bubble.xy + bubble.zw * 0.5;
+		float2 bh = bubble.zw * 0.5;
+		float rad = (theme == 0) ? 7.0 * ui : 12.0 * ui;
+		float dbox = sdBox(p - bc, bh, rad);
+		float bx = bubble.x + bubble.z;
+		float2 ta = float2(clamp(apex.x - 8.0 * ui, bubble.x + rad, bx - rad - 26.0 * ui) , bubble.y + bubble.w - 1.0);
+		float2 tb = ta + float2(24.0 * ui, 0.0);
+		float dt = tail_dist(p, ta, tb, apex);
+		float d = min(dbox, dt);
+
+		float sh = 1.0 - smoothstep(-2.0 * ui, 9.0 * ui, min(sdBox(p - bc - float2(2.0, 4.0) * ui, bh, rad), 1e4));
+		out_col = float4(0, 0, 0, 0.28 * sh * balpha);
+
+		float4 fill;
+		float3 bord;
+		float ba;
+		if (theme == 0) {
+			fill = float4(1.0, 1.0, 0.80, 1.0);
+			bord = float3(0, 0, 0);
+			ba = 1.0;
+		} else {
+			fill = float4(0.17, 0.17, 0.18, 0.97);
+			bord = float3(1, 1, 1);
+			ba = 0.14;
+		}
+		out_col = over(float4(fill.rgb, fill.a * cov(d)), out_col);
+		out_col = over(float4(bord, ba * cov(abs(d + 0.5) - 0.5)), out_col);
+		float2 tq = p - text_pos;
+		if (tq.x >= 0.0 && tq.y >= 0.0 && tq.x < text_size.x && tq.y < text_size.y)
+			out_col = over(text_tex.Sample(linear_clamp, tq / text_size), out_col);
+		out_col.a *= balpha;
+	}
+
+	// ---------------- paperclip
+	float S = char_box.z;
+	float2 pivot = float2(char_box.x, char_box.y + 0.40 * S);
+	float2 r = p - pivot;
+	float cs = cos(pose.x), sn = sin(pose.x);
+	r = float2(cs * r.x + sn * r.y, -sn * r.x + cs * r.y);
+	r /= float2(pose.y, pose.z);
+	float2 q = (r + pivot - float2(char_box.x, char_box.y)) / S + 0.5;
+	float px = 1.0 / S / 1.0;
+	float pxu = 1.0 / S;
+
+	float wr = 0.024;
+	float dc = sdClip(q);
+
+	// soft drop shadow
+	float ds = sdClip(q - float2(0.014, 0.024)) - wr;
+	float4 clip = float4(0, 0, 0, 0.32 * (1.0 - smoothstep(-2.0 * pxu, 5.0 * pxu * ui * 2.0, ds)));
+
+	float d = dc - wr;
+	float sm = 1.0 * pxu;
+	if (d < 3.0 * sm) {
+		// tube shading: bright on the upper-left side, dark rim on the far edge
+		float e = 0.010;
+		float lit = (sdClip(q + float2(-0.7071, -0.7071) * e) - dc) / e; // -1..1
+		float t = saturate(0.5 - lit * 0.5);
+		float3 col = lerp(float3(0.42, 0.45, 0.52), float3(0.93, 0.95, 0.99), t);
+		col *= lerp(0.62, 1.0, saturate(-d / (wr * 0.55)));
+		clip = over(float4(col, cov(d / sm)), clip);
+	}
+
+	float4 e1 = eye_layer(q, float2(0.435, 0.405), pxu, -1.0);
+	float4 e2 = eye_layer(q, float2(0.585, 0.405), pxu, 1.0);
+	// keep the eyes off the transparent area but on top of the wire
+	clip = over(e1, clip);
+	clip = over(e2, clip);
+
+	out_col = over(clip, out_col);
+	return out_col;
+}
+
+technique Draw
+{
+	pass
+	{
+		vertex_shader = VSDefault(v_in);
+		pixel_shader  = PSAssistant(v_in);
+	}
+}
